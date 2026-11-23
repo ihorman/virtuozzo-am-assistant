@@ -34,6 +34,69 @@ from .codes import (
 )
 
 ENV_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
+DOMAIN_RE = re.compile(
+    r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+# --- static catalog data (marketplace / templates) -------------------------
+
+MARKETPLACE_CATEGORIES = [
+    {"id": 1, "name": "Applications"},
+    {"id": 2, "name": "Databases"},
+    {"id": 3, "name": "Docker & Containers"},
+    {"id": 4, "name": "Add-ons"},
+]
+
+MARKETPLACE_APPS = [
+    {"id": 14, "name": "WordPress", "category": 1,
+     "description": "Single-instance WordPress with MySQL"},
+    {"id": 15, "name": "WordPress Cluster", "category": 1,
+     "description": "Highly-available WordPress cluster"},
+    {"id": 16, "name": "Nextcloud", "category": 1,
+     "description": "Self-hosted file sync and collaboration"},
+    {"id": 17, "name": "Magento", "category": 1,
+     "description": "E-commerce platform with MySQL and Redis"},
+    {"id": 21, "name": "MySQL", "category": 2,
+     "description": "MySQL database node"},
+    {"id": 22, "name": "MariaDB", "category": 2,
+     "description": "MariaDB database node"},
+    {"id": 23, "name": "PostgreSQL", "category": 2,
+     "description": "PostgreSQL database node"},
+    {"id": 24, "name": "Redis", "category": 2,
+     "description": "Redis in-memory data store"},
+    {"id": 31, "name": "Docker CE", "category": 3,
+     "description": "Docker Engine on a standalone container"},
+    {"id": 41, "name": "Let's Encrypt SSL", "category": 4,
+     "description": "Free SSL certificates for custom domains"},
+    {"id": 42, "name": "NFS Storage", "category": 4,
+     "description": "Shared NFS storage node"},
+]
+
+TEMPLATES = [
+    {"nodeType": "php", "name": "PHP", "versions": ["8.3", "8.2", "8.1"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "java", "name": "Java", "versions": ["21", "17", "11"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "nodejs", "name": "Node.js", "versions": ["20", "18"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "golang", "name": "Go", "versions": ["1.22", "1.21"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "ruby", "name": "Ruby", "versions": ["3.3", "3.2"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "python", "name": "Python", "versions": ["3.12", "3.11"],
+     "nodeGroups": ["cp"]},
+    {"nodeType": "mysql", "name": "MySQL", "versions": ["8.0", "5.7"],
+     "nodeGroups": ["db"]},
+    {"nodeType": "mariadb", "name": "MariaDB", "versions": ["10.11", "10.6"],
+     "nodeGroups": ["db"]},
+    {"nodeType": "postgres", "name": "PostgreSQL", "versions": ["16", "15"],
+     "nodeGroups": ["db"]},
+    {"nodeType": "mongodb", "name": "MongoDB", "versions": ["7.0", "6.0"],
+     "nodeGroups": ["db"]},
+    {"nodeType": "redis", "name": "Redis", "versions": ["7.2", "7.0"],
+     "nodeGroups": ["db", "cache"]},
+    {"nodeType": "nginx", "name": "NGINX", "versions": ["1.25"],
+     "nodeGroups": ["balancer"]},
+]
 
 
 @dataclass
@@ -96,6 +159,7 @@ class Env:
     logs: list = field(default_factory=list)
     app: Optional[dict] = None
     installations: list = field(default_factory=list)
+    ssl: Optional[dict] = None
 
     def advance(self, now: float) -> None:
         if self.pending and now >= self.pending[0]:
@@ -130,6 +194,7 @@ class Env:
         info["envVars"] = dict(self.env_vars)
         info["app"] = dict(self.app) if self.app else None
         info["installations"] = [dict(i) for i in self.installations]
+        info["ssl"] = dict(self.ssl) if self.ssl else None
         return info
 
 
@@ -587,3 +652,86 @@ class MockJelastic:
             }
         del env.env_vars[str(name)]
         return OK, {"vars": dict(env.env_vars)}
+
+    # -- catalogs, quotas, SSL ----------------------------------------------
+
+    def getcategories(self, session: Optional[str]):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        return OK, {"categories": [dict(c) for c in MARKETPLACE_CATEGORIES]}
+
+    def getapplist(self, session: Optional[str], category: Optional[str] = None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        apps = [dict(a) for a in MARKETPLACE_APPS]
+        if category not in (None, ""):
+            try:
+                cat_id = int(category)
+            except (TypeError, ValueError):
+                return INVALID_PARAMETER, {
+                    "error": "invalid parameter [category] for method [GetList]"
+                }
+            apps = [a for a in apps if a["category"] == cat_id]
+        return OK, {"apps": apps}
+
+    def gettemplates(self, session: Optional[str],
+                     node_group: Optional[str] = None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        templates = [dict(t) for t in TEMPLATES]
+        if node_group:
+            templates = [t for t in templates
+                         if node_group in t.get("nodeGroups", [])]
+        return OK, {"templates": templates}
+
+    def getquotas(self, session: Optional[str]):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        self.advance_all()
+        envs = [e for e in self.envs.values() if not e.removed]
+        node_count = sum(len(e.nodes) for e in envs)
+        cloudlets = sum(
+            n.fixed_cloudlets + n.flexible_cloudlets
+            for e in envs for n in e.nodes)
+        return OK, {"quotas": {
+            "environments": {"usage": len(envs), "limit": 10},
+            "nodes": {"usage": node_count, "limit": 50},
+            "cloudlets": {"usage": cloudlets, "limit": 400},
+        }}
+
+    def bindssl(self, session: Optional[str], env_name: Optional[str],
+                ext_domain: Optional[str]):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        if not ext_domain or not DOMAIN_RE.match(str(ext_domain)):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [extDomain] for method [BindSsl]"
+            }
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if env.status == "deleting" or env.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{env_name}] is being deleted"
+            }
+        if env.status in TRANSIENT_STATES:
+            return INVALID_PARAMETER, {
+                "error": f"another operation is in progress for [{env_name}]"
+            }
+        if env.status != "running":
+            return INVALID_PARAMETER, {
+                "error": f"environment [{env_name}] is not running"
+            }
+        env.ssl = {
+            "extDomain": str(ext_domain),
+            "issuer": "Let's Encrypt",
+            "issuedAt": self._now(),
+        }
+        self._log(env, f"Let's Encrypt SSL issued for {ext_domain}")
+        return OK, {"envName": env.name, "extDomain": str(ext_domain),
+                    "issuer": "Let's Encrypt", "status": "issued"}

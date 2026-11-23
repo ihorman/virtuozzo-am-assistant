@@ -257,6 +257,32 @@ class JelasticClient:
                                    params={"envName": env_name})
         return body.get("vars", {})
 
+    # -- catalogs / quotas / SSL (deploy wizard awareness) -------------------
+
+    async def marketplace_categories(self) -> list:
+        body = await self._request("marketplace/app/rest/getcategories")
+        return body.get("categories", [])
+
+    async def marketplace_apps(self, category: Optional[int] = None) -> list:
+        body = await self._request("marketplace/app/rest/getlist",
+                                   params={"category": category})
+        return body.get("apps", [])
+
+    async def list_templates(self, node_group: Optional[str] = None) -> list:
+        body = await self._request("environment/control/rest/gettemplates",
+                                   params={"nodeGroup": node_group})
+        return body.get("templates", [])
+
+    async def get_quotas(self) -> dict:
+        body = await self._request("billing/account/rest/getquotas")
+        return body.get("quotas", {})
+
+    async def bind_ssl(self, env_name: str, ext_domain: str) -> dict:
+        """Let's Encrypt flow (environment/binder/rest/bindssl)."""
+        return await self._request("environment/binder/rest/bindssl",
+                                   params={"envName": env_name,
+                                           "extDomain": ext_domain})
+
     # -- mutating tools (fire-and-forget: return on acknowledgement) --------
 
     async def create_env(self, env_name: str, *, nodes: Optional[list] = None,

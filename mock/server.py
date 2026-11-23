@@ -113,12 +113,25 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
                       "environment/control/rest/setcontainerenvvars"):
             return _envelope(*st.setenvvariables(
                 p.get("session"), p.get("envName"), p.get("vars")))
-        if method == "environment/control/rest/addcontainerenvvars":
+        if method in ("environment/control/rest/addcontainerenvvars",):
             return _envelope(*st.addenvvariable(
                 p.get("session"), p.get("envName"), p.get("name"), p.get("value")))
-        if method == "environment/control/rest/removecontainerenvvars":
+        if method in ("environment/control/rest/removecontainerenvvars",):
             return _envelope(*st.removeenvvariable(
                 p.get("session"), p.get("envName"), p.get("name")))
+
+        if method == "marketplace/app/rest/getcategories":
+            return _envelope(*st.getcategories(p.get("session")))
+        if method == "marketplace/app/rest/getlist":
+            return _envelope(*st.getapplist(p.get("session"), p.get("category")))
+        if method == "environment/control/rest/gettemplates":
+            return _envelope(*st.gettemplates(
+                p.get("session"), p.get("nodeGroup")))
+        if method == "billing/account/rest/getquotas":
+            return _envelope(*st.getquotas(p.get("session")))
+        if method == "environment/binder/rest/bindssl":
+            return _envelope(*st.bindssl(
+                p.get("session"), p.get("envName"), p.get("extDomain")))
 
         return _envelope(1, {"error": f"unknown method [{method}]"})
 
