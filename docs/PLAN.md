@@ -101,6 +101,15 @@ Known platform behaviors baked into the client: async ops (never conclude
 failure from a timeout), `deleteenv` needs `password`, session expiry,
 `2212` = deletion already running, per-environment operation serialization.
 
+**Scope confinement (mandatory)**: the MCP server must never be usable as a
+general-purpose tool for the model. Closed tool surface (no fetch/exec/file),
+host allowlist + session-token pinning (token only ever sent to the configured
+platform origin), SSRF guards on all user-supplied URLs, anchored regex input
+validation, untrusted-data framing for everything returned by the platform,
+secret masking, rate/depth limits, optional read-only mode. Full threat model
+and enforcement rules: `docs/SECURITY.md`; the hardening is verified by its
+own test card (T10).
+
 ### One-command MCP connect (product requirement)
 
 Connecting the assistant to the user's OWN agent must be one command:
