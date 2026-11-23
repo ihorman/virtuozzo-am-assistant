@@ -190,11 +190,20 @@ variables, async status transitions. Used for:
 
 ## 7. Deployment kit
 
+- **Target: hermes.bannoe.it** — agent + MCP served behind the existing Caddy
+  (path route `/am-assistant/*` -> local uvicorn port; Caddyfile is shared and
+  heavily proxied: full review + backup before the single-block addition,
+  then `caddy reload` + curl verification).
+- **LLM: Xiaomi MiMo `mimo-v2.6-pro`** via the OpenAI-compatible endpoint
+  (`VAP_LLM_BASE_URL=https://token-plan-sgp.xiaomimimo.com/v1`,
+  `VAP_LLM_MODEL=mimo-v2.6-pro`, `VAP_LLM_API_KEY` from server env — never
+  committed). E2E-verified: a real chat completion must return through MiMo
+  before the deployment is called done.
 - `deploy/Dockerfile` — mcp + agent in one container (uvicorn), env-configured.
-- `deploy/manifest.jps` — installs the assistant as its own environment on the
-  stand (dogfooding; its own env = existing system untouched), with the MCP
-  endpoint exposed.
-- `deploy/Caddyfile.snippet` — optional hosting on hermes.bannoe.it.
+- `deploy/manifest.jps` — optional: installs the assistant as its own
+  environment on the platform (dogfooding; its own env = existing system
+  untouched), with the MCP endpoint exposed.
+- `deploy/Caddyfile.snippet` — the path-route block for hermes.bannoe.it.
 - Extension zip build script for distribution.
 
 ## 8. Repo layout
