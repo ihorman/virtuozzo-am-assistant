@@ -73,6 +73,8 @@ per call and never echoed or logged). Expired sessions surface as a clear
 |---|---|
 | `docs/` | plan, API contract, security, usage, design |
 | `mcp/` | MCP server (JSON-RPC + Streamable HTTP + stdio) + JelasticClient |
+| `virtuozzo_am_mcp/` | `virtuozzo-am-mcp` onboarding CLI (login / install / serve) |
+| `packaging/` | npx wrapper package for the onboarding CLI |
 | `agent/` | FastAPI chat backend, SSE, guided flows |
 | `extension/` | Chrome MV3 widget (FAB + side panel chat) |
 | `mock/` | mock Jelastic API + mock dashboard page for tests/dev |
@@ -142,6 +144,51 @@ MCP surface stays fully live.
 ```bash
 pytest            # network-free by construction (tests/conftest.py socket guard)
 ```
+
+## Connect your own agent (one command)
+
+Plug your own AI agent (Claude Code, Cursor, Hermes, or any MCP client) into
+the platform — no dashboard scraping, no glue code:
+
+```bash
+npx virtuozzo-am-mcp login --host https://<your-panel-host>
+npx virtuozzo-am-mcp install
+```
+
+- `login` authenticates (Keycloak/SSO browser flow, or `--email` + password
+  prompt; `--session <token>` if you already have one) and stores the
+  platform session in `~/.virtuozzo-am/config.json` (mode 0600).
+- `install` detects your agent (Claude Code / Cursor / Hermes / generic) and
+  writes its MCP config in ONE command — then prints the equivalent
+  one-liner for manual paste.
+- `serve` is the local stdio MCP bridge the agent spawns (same 21-tool
+  surface as `mcp/`, session read from `~/.virtuozzo-am/config.json`).
+
+No Node? Run the same CLI from a checkout: `python3 -m virtuozzo_am_mcp ...`
+(Python 3.11+, `pip install httpx`). The npx package lives in
+`packaging/npm/` (`bash packaging/npm/build.sh` assembles it).
+
+Copy-paste variants:
+
+```bash
+# Zero-install, hosted MCP endpoint — one line, no local process:
+claude mcp add --transport http virtuozzo-am https://<assistant-host>/mcp \
+  --header "X-Jelastic-Host: https://<your-panel-host>" \
+  --header "X-Jelastic-Session: <token from `virtuozzo-am-mcp login`>"
+
+# Local stdio bridge (no hosted server needed):
+claude mcp add virtuozzo-am -- npx -y virtuozzo-am-mcp serve --host https://<your-panel-host>
+
+# Hermes:
+hermes mcp add virtuozzo-am --command npx --args -y virtuozzo-am-mcp serve
+# remote variant: `hermes mcp add virtuozzo-am --url <endpoint> --auth header`
+# — the X-Jelastic-* headers go in ~/.hermes/config.yaml (`install` writes them)
+
+# Any other MCP client: `virtuozzo-am-mcp install --agent generic` writes a
+# plain {"mcpServers": {...}} JSON you can paste anywhere.
+```
+
+Per-client config shapes and the hosted endpoint details are below.
 
 ## Connect an external MCP client
 
