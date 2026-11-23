@@ -19,7 +19,7 @@ permissions, from three surfaces:
 ### Install (developer mode, 1 minute)
 
 1. Build or download the extension (`scripts/package_extension.sh` produces
-   `virtuozzo-am-assistant-extension.zip`).
+   `dist/virtuozzo-am-assistant-extension-v<version>.zip`).
 2. Open `chrome://extensions`, enable **Developer mode**.
 3. **Load unpacked** -> pick the `extension/` directory (or unzip the release).
 4. Open the extension **Options** and set your assistant endpoint URL

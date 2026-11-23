@@ -1,0 +1,32 @@
+[Unit]
+Description=VAP Copilot assistant (agent + MCP, uvicorn)
+Documentation=https://github.com/ihorman/vap-copilot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vap-copilot
+Group=vap-copilot
+WorkingDirectory=/opt/vap-copilot
+# /etc/vap-copilot.env (root:vap-copilot 0640) holds deployment-time secrets:
+#   VAP_LLM_BASE_URL=https://token-plan-sgp.xiaomimimo.com/v1
+#   VAP_LLM_MODEL=mimo-v2.6-pro
+#   VAP_LLM_API_KEY=<key>
+#   VAP_SERVE_HOST=127.0.0.1
+#   VAP_SERVE_PORT=8080
+# Never commit this file anywhere.
+EnvironmentFile=/etc/vap-copilot.env
+ExecStart=/opt/vap-copilot/.venv/bin/python -m deploy.serve
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/vap-copilot
+
+[Install]
+WantedBy=multi-user.target

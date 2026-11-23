@@ -1,0 +1,30 @@
+# VAP Copilot (virtuozzo-am-assistant) - path route for hermes.bannoe.it
+#
+# Paste the block(s) below INSIDE the existing `hermes.bannoe.it` site block,
+# at the END of its routes. The Caddyfile on this host carries many reverse
+# proxies, so follow the procedure exactly:
+#
+#   1. full review of /etc/caddy/Caddyfile (know every existing route first)
+#   2. sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)
+#   3. add this snippet; validate:
+#        sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#   4. sudo caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+#   5. verify:
+#        curl -fsS https://hermes.bannoe.it/am-assistant/healthz
+#        curl -fsS -X POST https://hermes.bannoe.it/am-assistant/mcp \
+#          -H 'content-type: application/json' \
+#          -H 'X-Jelastic-Host: https://<panel-host>' \
+#          -H 'X-Jelastic-Session: <session>' \
+#          -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+#
+# The assistant runs on 127.0.0.1:8080 (systemd unit deploy/vap-assistant.service
+# or the Docker image). handle_path strips the /am-assistant prefix, so the app
+# sees /mcp, /api/*, /healthz as in its own route map. Custom X-Jelastic-*
+# headers and SSE streams pass through unchanged.
+
+handle_path /am-assistant/* {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Bare /am-assistant (no trailing slash) -> app root
+redir /am-assistant /am-assistant/ permanent

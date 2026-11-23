@@ -1,0 +1,88 @@
+# Virtuozzo AM Assistant (VAP Copilot) - OPTIONAL JPS package.
+#
+# Installs the assistant as its OWN environment on the stand: one Docker node
+# running the image built from deploy/Dockerfile. Nothing in the existing
+# platform system is touched - this is just another user environment
+# (dogfooding install, PLAN section 7).
+#
+# Prerequisite: build and push the image to a registry the stand can pull:
+#   docker build -t registry.example.com/vap-copilot:0.1.0 -f deploy/Dockerfile .
+#   docker push registry.example.com/vap-copilot:0.1.0
+# Then install this manifest and pass the registry URL as the "image" setting.
+#
+# Notes:
+# - The image CMD runs uvicorn on 0.0.0.0:8080 (see deploy/serve.py).
+# - Domain routing for custom Docker nodes varies per stand; if the public
+#   URL does not answer, declare the node port/endpoints per your stand's
+#   docs and verify with curl before calling the install done.
+# - The LLM API key is a settings field of THIS install only: it lands in the
+#   container env of this environment and is never written to the manifest.
+
+type: install
+id: virtuozzo-am-assistant
+name: Virtuozzo AM Assistant
+version: 0.1.0
+description:
+  text: AI assistant for the Virtuozzo Application Manager - chat, guided flows and an MCP tool endpoint. Runs as its own environment; the existing system stays untouched.
+  short: VAP Copilot assistant
+
+nodes:
+  - image: ${settings.image}
+    nodeType: docker
+    displayName: VAP Copilot
+    nodeGroup: cp
+    cloudlets: 8
+    env:
+      VAP_SERVE_PORT: "8080"
+      VAP_LLM_BASE_URL: ${settings.llm-base-url}
+      VAP_LLM_MODEL: ${settings.llm-model}
+      VAP_LLM_API_KEY: ${settings.llm-api-key}
+
+onInstall:
+  - cmd[cp]: |-
+      # Wait for the assistant to come up, then verify health (no curl in the
+      # slim image - use python). The platform passes failures straight back.
+      ok=0
+      for i in $(seq 1 30); do
+        if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)" >/dev/null 2>&1; then
+          ok=1
+          break
+        fi
+        sleep 2
+      done
+      if [ "$ok" != "1" ]; then
+        echo "assistant failed to start: /healthz not answering on 8080" >&2
+        exit 1
+      fi
+      python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read().decode())"
+
+settings:
+  fields:
+    - name: image
+      type: string
+      caption: Assistant Docker image (built from deploy/Dockerfile)
+      default: registry.example.com/vap-copilot:0.1.0
+      required: true
+    - name: llm-base-url
+      type: string
+      caption: OpenAI-compatible LLM base URL
+      default: https://token-plan-sgp.xiaomimimo.com/v1
+      required: true
+    - name: llm-model
+      type: string
+      caption: LLM model
+      default: mimo-v2.6-pro
+      required: true
+    - name: llm-api-key
+      type: password
+      caption: LLM API key (stored only in this environment's container env)
+      required: true
+
+success: |
+  ### VAP Copilot is up
+  - Health: [https://${env.domain}/healthz](https://${env.domain}/healthz)
+  - MCP endpoint: `https://${env.domain}/mcp`
+
+  Point your browser extension or MCP client at `https://${env.domain}`.
+  The assistant acts only with each user's own platform session; it never
+  stores passwords.
