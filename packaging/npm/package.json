@@ -1,0 +1,27 @@
+{
+  "name": "virtuozzo-am-mcp",
+  "version": "0.1.0",
+  "description": "One-command MCP onboarding for the Virtuozzo Application Manager (Jelastic/VAP): login, connect your agent, run a local stdio MCP bridge.",
+  "license": "MIT",
+  "bin": {
+    "virtuozzo-am-mcp": "bin/virtuozzo-am-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "jelastic",
+    "virtuozzo",
+    "vap",
+    "claude",
+    "cursor",
+    "hermes"
+  ]
+}
