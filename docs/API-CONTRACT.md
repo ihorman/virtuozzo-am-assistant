@@ -32,7 +32,7 @@ Response: `text/event-stream`, each event `data: {json}`:
 | `ask_user` | `{"question": "...", "options": ["..."], "allow_free": true, "ask_id": "..."}` | clarifying question; UI renders option chips + free text; answer sent as `POST /api/answer` |
 | `confirm_action` | `{"summary": "...", "actions": ["..."], "confirm_id": "...", "danger": false}` | mutation gate; UI renders Confirm/Cancel; answer sent as `POST /api/answer` |
 | `progress` | `{"label": "...", "call_id": "..."}` | long operation running; UI renders progress card with elapsed timer |
-| `card` | `{"kind": "success\|info\|error", "title": "...", "body_md": "...", "actions": [{"label": "...", "url": "..."}]}` | rich result card (success card with Open app / View logs buttons, translated error card with fix actions) |
+| `card` | `{"kind": "success\|info\|error\|security", "title": "...", "body_md": "...", "actions": [{"label": "...", "url": "...", "action": "auto_fix\|retry\|open_logs\|open_url\|custom", "payload": {...}}]}` | rich result card. Error cards MUST run diagnosis first and offer `action: "auto_fix"` as the primary button when a repair is possible; `payload` carries the repair plan id from `plan_repair`. `security` cards carry security-review findings with one-click fixes |
 | `done` | `{"conversation_id": "..."}` | turn complete |
 | `error` | `{"code": "...", "message": "..."}` | recoverable or fatal error |
 
@@ -48,6 +48,12 @@ Rejected confirmations cancel the mutation and the agent narrates the abort.
 
 Echoes the last `X-Vap-Context` for the conversation; used by the UI to show
 "working with environment X".
+
+### `GET /api/audit`
+
+Compliance log for the conversation's platform actions: `[{"at": "...",
+"tool": "...", "target": "...", "summary": "...", "ok": true}]` — mutation
+audit trail (no secret values). The UI renders it as a "What I changed" card.
 
 ### `GET /healthz`
 

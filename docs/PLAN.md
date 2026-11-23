@@ -90,6 +90,8 @@ v1 wraps the ~22 methods that cover the end-user flows:
 | `logs_read` | `getlogs` | tail node/app logs |
 | `env_var_get` / `env_var_set` | `environment/control/rest/getenvvariables`... | |
 | `ssl_letsencrypt` | `environment/security/rest/...` | gated |
+| `security_check` | composite (firewall, sslstate, endpoints, env-var scan) | in-flow security review; masks secret values |
+| `audit_list` | — (assistant's own action log) | compliance: what changed, when, result |
 | `marketplace_list` | `marketplace/app/rest/getcategories`... | curated app catalog for the deploy wizard |
 | `templates_list` | `environment/control/rest/getcontainers`... | stacks/engines available |
 | `quota_get` | `billing/quota/rest/getquotas` | "in your limits" awareness |
@@ -138,6 +140,29 @@ one clarifying question with options (the "наводящие вопросы"):
 3. **Scale / troubleshoot**: read stats -> interpret -> propose -> confirm ->
    apply -> re-read stats.
 4. **Anything else**: direct tool use with confirmation for mutations.
+5. **Error diagnosis & auto-repair**: on ANY platform error or failed step the
+   agent must not dead-end. It gathers evidence (logs, env/node stats, state
+   around the failing resource), classifies the failure (quota, DNS/SSL, OOM,
+   disk, port conflict, expired cert, failed JPS action, expired session...),
+   explains the cause in plain language and proposes an **auto-fix plan** as a
+   one-click primary action. Repair runs guarded: plan recap -> Confirm ->
+   apply -> verify -> success card, or an honest "couldn't fix, here is what I
+   tried and what to do next".
+6. **Security & compliance in every flow** (never bolted on):
+   - Deploy wizard ends with a **Security review** step: secrets-looking env
+     vars flagged (values masked), public DB/ports exposure checked, SSL
+     status, firewall state, outdated image notice. Findings render as a
+     security card with one-click fixes (enable SSL, close exposure, rotate).
+   - **Auto-fix guardrails**: a repair may never disable or weaken security
+     (firewall, SSL, auth), never open new public endpoints, never widen
+     permissions — such steps require their own explicit confirmation.
+   - **Audit trail**: every mutation is recorded (timestamp, tool, target,
+     result) and available via `GET /api/audit` / an "What I changed" card —
+     full traceability for compliance; no silent changes, ever.
+   - **Secrets hygiene**: passwords/tokens never stored server-side, never
+     logged, always masked in tool results and cards (contract rule).
+   - Least privilege by design: the assistant carries only the end user's own
+     platform rights (session passthrough) — nothing more.
 
 Clarifying-question protocol: tool `ask_user(question, options[], allow_free)`
 renders as choice chips in the extension; free text always allowed.

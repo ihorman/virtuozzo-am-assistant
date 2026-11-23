@@ -62,8 +62,19 @@ theme or `prefers-color-scheme`.
    buttons), action buttons: **Open app ↗**, **Open dashboard ↗**, **View
    logs**. This card is the "wow" moment — it must feel like a finished
    product, not a log dump.
-9. **Error card**: plain-language cause + suggested fix button ("Retry",
-   "Fix it", "Open docs") — never a raw error code without translation.
+9. **Error card**: never a dead end. The agent **diagnoses first** (reads
+   logs, stats, env/node state around the failure), explains the cause in
+   plain language, then offers **Fix it automatically** as the primary button
+   (plus Retry / Open logs / Open docs as secondary). Auto-fix runs as a
+   guarded repair flow: fix plan recap -> Confirm -> apply -> verify -> success
+   card (or an honest "couldn't fix it, here is what I tried and what to do
+   next"). No raw error codes without translation.
+10. **Security card** (`kind: security`): shield header, findings list with
+    severity pills (high=warn, medium=warn, low=muted), each finding with a
+    one-click fix button. Appears as the last step of the deploy wizard and on
+    demand ("check my environment security"). Secrets are always masked.
+11. **Audit card** ("What I changed"): timeline of every mutation (time,
+    action, target, result pill) — the compliance face of the assistant.
 
 ## UX rules (non-negotiable)
 
