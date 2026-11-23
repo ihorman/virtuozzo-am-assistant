@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>virtuozzo-am-assistant — widget design preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B1220; --surface:rgba(255,255,255,.05); --surface-2:rgba(255,255,255,.09);
+    --border:rgba(255,255,255,.10); --accent:#3B82F6; --accent-grad:linear-gradient(135deg,#234F95,#3B82F6);
+    --vz-red:#D71920; --ok:#16A34A; --warn:#F97316; --text:#E6EDF7; --muted:#8B9BB4;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:radial-gradient(1200px 600px at 20% -10%,#16233F 0%,var(--bg) 55%);
+    color:var(--text);font-family:Inter,system-ui,sans-serif;padding:24px 24px 40px}
+  .col{width:420px}
+  .mono{font-family:'JetBrains Mono',monospace}
+  h1.section{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+    margin:28px 0 10px;font-weight:600}
+
+  /* glass surface */
+  .glass{background:linear-gradient(180deg,rgba(255,255,255,.085),rgba(255,255,255,.028));
+    border:1px solid rgba(255,255,255,.13);backdrop-filter:blur(18px)}
+
+  /* context bar */
+  .ctxbar{display:flex;align-items:center;gap:10px;border-radius:14px;padding:10px 12px}
+  .pill{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.09);
+    border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:5px 12px;font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px rgba(22,163,74,.8)}
+  .dot.warn{background:var(--warn);box-shadow:0 0 8px rgba(249,115,22,.8)}
+  .dot.off{background:var(--muted);box-shadow:none}
+  .ctxbar .host{margin-left:auto;font-size:11px;color:var(--muted)}
+  .gear{width:32px;height:32px;flex:none;border-radius:10px;background:rgba(255,255,255,.09);
+    border:1px solid rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;
+    font-size:14px;color:var(--text);cursor:pointer}
+
+  /* hero */
+  .hero{margin-top:18px;padding:26px 22px;border-radius:16px;
+    background:linear-gradient(165deg,rgba(59,130,246,.20),rgba(255,255,255,.04) 55%);
+    border:1px solid rgba(255,255,255,.13);backdrop-filter:blur(18px)}
+  .hero h2{font-size:26px;line-height:1.15;font-weight:700;
+    background:var(--accent-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{color:var(--muted);font-size:13px;margin-top:10px;line-height:1.55;max-width:330px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{display:inline-flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.15);
+    background:rgba(255,255,255,.10);color:var(--text);
+    border-radius:999px;padding:8px 14px;font-size:12.5px;font-weight:500;cursor:pointer;
+    transition:all .18s ease-out}
+  .chip:hover{border-color:var(--accent);background:rgba(59,130,246,.18);transform:translateY(-1px)}
+  .chip.primary{background:var(--accent-grad);border-color:transparent}
+
+  /* messages */
+  .msg{max-width:88%;padding:12px 15px;border-radius:14px;font-size:13.5px;line-height:1.55;margin-top:12px}
+  .msg.a{background:linear-gradient(180deg,rgba(255,255,255,.085),rgba(255,255,255,.028));
+    border:1px solid rgba(255,255,255,.13);backdrop-filter:blur(18px)}
+  .msg.u{margin-left:auto;background:var(--accent-grad);border-radius:14px 14px 4px 14px}
+
+  /* wizard card */
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.085),rgba(255,255,255,.028));
+    border:1px solid rgba(255,255,255,.13);border-radius:14px;padding:16px;
+    margin-top:12px;backdrop-filter:blur(18px)}
+  .steps{display:flex;gap:6px;align-items:center;margin-bottom:12px}
+  .step{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+  .step .b{width:20px;height:20px;border-radius:50%;background:var(--surface-2);border:1px solid var(--border);
+    display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600}
+  .step.done .b{background:rgba(22,163,74,.25);border-color:var(--ok);color:var(--ok)}
+  .step.now .b{background:var(--accent-grad);border-color:transparent;color:#fff}
+  .step.now{color:var(--text)}
+  .bar{flex:1;height:1px;background:var(--border)}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:4px}
+  .card .sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+
+  /* confirm */
+  .confirm{border-color:rgba(59,130,246,.45)}
+  .confirm.danger{border-color:rgba(215,25,32,.55)}
+  .recap{font-size:12.5px;line-height:1.7;color:var(--text)}
+  .recap .mono{background:rgba(255,255,255,.07);border-radius:6px;padding:1px 6px;font-size:11.5px}
+  .btnrow{display:flex;gap:8px;margin-top:14px}
+  .btn{border-radius:10px;padding:9px 16px;font-size:12.5px;font-weight:600;cursor:pointer;border:1px solid transparent;
+    transition:all .18s ease-out}
+  .btn.primary{background:var(--accent-grad);color:#fff}
+  .btn.primary:hover{filter:brightness(1.12);transform:translateY(-1px)}
+  .btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}
+  .btn.danger{background:var(--vz-red);color:#fff}
+  .btn.ok{background:rgba(22,163,74,.2);border-color:rgba(22,163,74,.5);color:#7ee2a8}
+
+  /* progress */
+  .prog{height:6px;border-radius:999px;background:var(--surface-2);overflow:hidden;margin:12px 0 8px;position:relative}
+  .prog i{position:absolute;inset:0;width:40%;border-radius:999px;background:var(--accent-grad);
+    animation:slide 1.6s ease-in-out infinite}
+  @keyframes slide{0%{left:-40%}100%{left:100%}}
+  .elapsed{font-size:11px;color:var(--muted);display:flex;justify-content:space-between}
+
+  /* success */
+  .success{border-color:rgba(22,163,74,.45);background:linear-gradient(165deg,rgba(22,163,74,.12),rgba(255,255,255,.03))}
+  .check{width:38px;height:38px;border-radius:50%;background:rgba(22,163,74,.22);color:#4ade80;
+    display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;margin-bottom:10px}
+  .kv{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.06);border:1px solid var(--border);
+    border-radius:9px;padding:8px 11px;margin-top:7px;font-size:11.5px}
+  .kv .k{color:var(--muted);width:74px;flex:none}
+  .kv .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .copy{margin-left:auto;flex:none;border:1px solid var(--border);background:var(--surface-2);color:var(--muted);
+    border-radius:7px;padding:3px 8px;font-size:10px;cursor:pointer}
+
+  /* error */
+  .error{border-color:rgba(215,25,32,.45)}
+  .error .t{color:#ff8a8a;font-weight:600;font-size:13px}
+
+  /* input */
+  .inputbar{display:flex;align-items:flex-end;gap:8px;margin-top:18px;background:var(--surface);
+    border:1px solid var(--border);border-radius:14px;padding:10px 10px 10px 15px;backdrop-filter:blur(16px)}
+  .inputbar .ph{flex:1;color:var(--muted);font-size:13px;padding:6px 0}
+  .send{width:36px;height:36px;border-radius:10px;background:var(--accent-grad);display:flex;
+    align-items:center;justify-content:center;font-size:15px;color:#fff}
+  .kbd{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 5px}
+</style>
+</head>
+<body>
+<div class="col">
+
+  <div class="ctxbar">
+    <span class="pill mono"><span class="dot"></span>env-5516365</span>
+    <span class="pill" style="font-size:11px">VHC · eu1</span>
+    <span class="host mono">app.vhc.virtuozzo.com</span>
+    <div class="gear">⚙</div>
+  </div>
+
+  <div class="hero">
+    <h2>What should we deploy<br>today?</h2>
+    <p>I can deploy apps, add databases, scale and troubleshoot — just tell me what you need. I'll ask one question at a time and confirm every change.</p>
+    <div class="chips">
+      <div class="chip primary">🚀 Deploy my first app</div>
+      <div class="chip">🗄 Add a database</div>
+      <div class="chip">⚡ Make my app faster</div>
+      <div class="chip">🔒 Set up SSL</div>
+    </div>
+  </div>
+
+  <h1 class="section">Guided flow — wizard card + ask_user chips</h1>
+  <div class="msg u">Deploy a Node.js app from GitHub</div>
+  <div class="msg a">Nice choice! Let's get it running. Which environment should it live in?</div>
+  <div class="card">
+    <div class="steps">
+      <div class="step done"><div class="b">✓</div>Source</div><div class="bar"></div>
+      <div class="step now"><div class="b">2</div>Topology</div><div class="bar"></div>
+      <div class="step"><div class="b">3</div>Size</div><div class="bar"></div>
+      <div class="step"><div class="b">4</div>Review</div>
+    </div>
+    <h3>Where should it run?</h3>
+    <div class="sub">Pick an existing environment or create a new one.</div>
+    <div class="chips">
+      <div class="chip primary">✨ New environment</div>
+      <div class="chip mono">env-5516365</div>
+      <div class="chip mono">staging-01</div>
+    </div>
+    <div class="inputbar" style="margin-top:12px">
+      <div class="ph">or type an environment name…</div>
+      <div class="send">➤</div>
+    </div>
+  </div>
+
+  <h1 class="section">Confirm card — nothing happens without this</h1>
+  <div class="card confirm">
+    <h3>Ready to deploy — please confirm</h3>
+    <div class="recap">
+      Creates <span class="mono">new-env</span> with <b>Node.js 20</b> + <b>PostgreSQL 16</b><br>
+      Resources: 4 cloudlets fixed / 8 flexible (≈ $12/mo est.)<br>
+      Domain: <span class="mono">new-env.eu1.paas.virtuozzo.cloud</span> · SSL: Let's Encrypt
+    </div>
+    <div class="btnrow">
+      <div class="btn primary">Confirm & deploy</div>
+      <div class="btn ghost">Cancel</div>
+    </div>
+  </div>
+
+  <h1 class="section">Progress card — live operations</h1>
+  <div class="card">
+    <h3>Deploying Node.js app…</h3>
+    <div class="sub">Creating environment · step 2 of 3</div>
+    <div class="prog"><i></i></div>
+    <div class="elapsed"><span>elapsed 00:42</span><span style="color:#7db4ff">cancel</span></div>
+  </div>
+
+  <h1 class="section">Success card — the wow moment</h1>
+  <div class="card success">
+    <div class="check">✓</div>
+    <h3>Deployed and verified!</h3>
+    <div class="sub">Your app answers HTTP 200 at the new domain.</div>
+    <div class="kv"><span class="k">App URL</span><span class="v mono">https://new-env.eu1.paas.virtuozzo.cloud</span><span class="copy">copy</span></div>
+    <div class="kv"><span class="k">DB</span><span class="v mono">postgres://new-env…:5432/appdb</span><span class="copy">copy</span></div>
+    <div class="btnrow">
+      <div class="btn primary">Open app ↗</div>
+      <div class="btn ok">Open dashboard ↗</div>
+      <div class="btn ghost">View logs</div>
+    </div>
+  </div>
+
+  <h1 class="section">Error card — translated, with a fix</h1>
+  <div class="card error">
+    <div class="t">Deployment didn't finish — the archive URL returned 404</div>
+    <div class="sub" style="margin-top:6px">The link <span class="mono">github.com/…/app.tar.gz</span> doesn't exist or is private. Try a release asset URL, or connect a Git repository instead.</div>
+    <div class="btnrow">
+      <div class="btn primary">Retry with new URL</div>
+      <div class="btn ghost">Connect Git instead</div>
+    </div>
+  </div>
+
+  <h1 class="section">Input bar</h1>
+  <div class="inputbar">
+    <div class="ph">Ask anything — “deploy…”, “add a database”, “why is my app slow?”</div>
+    <span class="kbd">⏎</span>
+    <div class="send">➤</div>
+  </div>
+
+</div>
+</body>
+</html>

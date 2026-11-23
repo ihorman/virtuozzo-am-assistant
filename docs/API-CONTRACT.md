@@ -1,8 +1,9 @@
-# VAP Copilot — Extension <-> Agent API Contract (frozen)
+# VAP Copilot — Extension <-> Agent API Contract (frozen v1.1)
 
-Version 1. All messages are JSON. The extension never talks to the platform
-directly except for session-token capture; every platform call goes through
-the agent (which passes the token through to the MCP layer).
+Version 1.1 — adds `progress` and `card` stream events (design-driven rich
+cards; see docs/DESIGN.md). All messages are JSON. The extension never talks to
+the platform directly except for session-token capture; every platform call
+goes through the agent (which passes the token through to the MCP layer).
 
 ## Common request headers (extension -> agent)
 
@@ -30,6 +31,8 @@ Response: `text/event-stream`, each event `data: {json}`:
 | `tool_result` | `{"call_id": "...", "ok": true, "summary": "..."}` | tool finished (summary only, no secrets) |
 | `ask_user` | `{"question": "...", "options": ["..."], "allow_free": true, "ask_id": "..."}` | clarifying question; UI renders option chips + free text; answer sent as `POST /api/answer` |
 | `confirm_action` | `{"summary": "...", "actions": ["..."], "confirm_id": "...", "danger": false}` | mutation gate; UI renders Confirm/Cancel; answer sent as `POST /api/answer` |
+| `progress` | `{"label": "...", "call_id": "..."}` | long operation running; UI renders progress card with elapsed timer |
+| `card` | `{"kind": "success\|info\|error", "title": "...", "body_md": "...", "actions": [{"label": "...", "url": "..."}]}` | rich result card (success card with Open app / View logs buttons, translated error card with fix actions) |
 | `done` | `{"conversation_id": "..."}` | turn complete |
 | `error` | `{"code": "...", "message": "..."}` | recoverable or fatal error |
 
