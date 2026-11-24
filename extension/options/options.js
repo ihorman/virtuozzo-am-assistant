@@ -1,10 +1,10 @@
-/* Application Management Assistant options page logic: settings + session fallback + diagnostics. */
+/* Virtuozzo Application Management Assistant options page logic:
+ * one visible field (Platform, auto-detected), everything else in Advanced. */
 "use strict";
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
   const fields = {
-    agentUrl: $("#agent-url"),
     panelHost: $("#panel-host"),
     sessionToken: $("#session-token"),
   };
@@ -28,8 +28,13 @@
   async function load() {
     const reply = await rpc({ type: "get-settings" });
     if (reply.ok) {
-      fields.agentUrl.value = reply.settings.agentUrl || "";
       fields.panelHost.value = reply.settings.panelHost || "";
+      const hint = $("#platform-hint");
+      if (reply.settings.panelHost) {
+        hint.textContent = `Pinned to ${reply.settings.panelHost}. Clear the field to go back to auto-detection.`;
+      } else {
+        hint.textContent = "Detected automatically when you open the dashboard. Type a URL here only to pin a specific platform.";
+      }
       setSessionStatus(
         reply.hasSession
           ? "Session token: captured ✓"
@@ -42,11 +47,7 @@
   }
 
   async function save() {
-    const settings = {
-      agentUrl: fields.agentUrl.value.trim() || VapApi.DEFAULT_SETTINGS.agentUrl,
-      panelHost: fields.panelHost.value.trim(),
-    };
-    await chrome.storage.sync.set(settings);
+    await chrome.storage.sync.set({ panelHost: fields.panelHost.value.trim() });
     const token = fields.sessionToken.value.trim();
     if (token) {
       await chrome.storage.local.set({ sessionToken: token });
@@ -56,7 +57,7 @@
     const note = $("#save-note");
     note.hidden = false;
     setTimeout(() => (note.hidden = true), 2000);
-    await rpc({ type: "get-settings" });
+    await load();
   }
 
   async function detect() {
@@ -72,10 +73,7 @@
   async function health() {
     const out = $("#diagnostics");
     out.textContent = "Testing…";
-    const reply = await rpc({
-      type: "healthz",
-      agentUrl: fields.agentUrl.value.trim() || undefined,
-    });
+    const reply = await rpc({ type: "healthz" });
     if (reply.ok) {
       try {
         const body = JSON.parse(reply.body);
@@ -89,8 +87,8 @@
       }
     } else {
       out.textContent =
-        `cannot reach the agent: ${reply.error || reply.body || `HTTP ${reply.status}`}\n` +
-        `check the agent URL (current: ${fields.agentUrl.value || VapApi.DEFAULT_SETTINGS.agentUrl})`;
+        `cannot reach the assistant service: ${reply.error || reply.body || `HTTP ${reply.status}`}\n` +
+        `the service may be offline — try again in a moment`;
     }
   }
 

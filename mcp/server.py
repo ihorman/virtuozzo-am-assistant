@@ -1,4 +1,4 @@
-"""MCP server for Application Management Assistant: Streamable HTTP (``/mcp``) + stdio.
+"""MCP server for Virtuozzo Application Management Assistant: Streamable HTTP (``/mcp``) + stdio.
 
 Transport contract (docs/API-CONTRACT.md):
 

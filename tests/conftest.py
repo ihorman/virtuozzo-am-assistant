@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the Application Management Assistant suite.
+"""Shared pytest fixtures for the Virtuozzo Application Management Assistant suite.
 
 All tests run against the in-process mock (ASGI transport) — no real network.
 The repo root is put on ``sys.path`` first so ``mock`` and ``mcp`` resolve to

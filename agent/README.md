@@ -1,4 +1,4 @@
-# agent — Application Management Assistant agent backend
+# agent — Virtuozzo Application Management Assistant agent backend
 
 FastAPI chat backend for the Virtuozzo Application Manager assistant: SSE
 chat, guided flows (deploy / add database / scale / troubleshoot), the

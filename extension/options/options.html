@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Application Management Assistant — Settings</title>
+  <title>Virtuozzo Application Management Assistant — Settings</title>
   <link rel="stylesheet" href="../fonts/fonts.css">
   <link rel="stylesheet" href="options.css">
 </head>
@@ -12,29 +12,25 @@
     <header class="head">
       <img src="../icons/icon-48.png" alt="" width="40" height="40">
       <div>
-        <h1>Application Management Assistant Settings</h1>
+        <h1>Virtuozzo Application Management Assistant Settings</h1>
         <p class="muted">Escape hatch only — the assistant works without any configuration.</p>
       </div>
     </header>
 
     <section class="panel">
-      <h2>Connection</h2>
+      <h2>Platform</h2>
       <label class="field">
-        <span class="label">Agent URL</span>
-        <input id="agent-url" type="url" spellcheck="false"
-               placeholder="https://office.bannoe.it/am-assistant">
-        <span class="hint">The chat backend that powers the assistant.</span>
-      </label>
-      <label class="field">
-        <span class="label">Platform host (dashboard)</span>
+        <span class="label">Platform</span>
         <input id="panel-host" type="url" spellcheck="false"
-               placeholder="auto-detect">
-        <span class="hint">Where the FAB appears and where the session is captured.
-          Leave empty for auto-detect.</span>
+               placeholder="auto-detected from the dashboard">
+        <span class="hint" id="platform-hint">Detected automatically when you open the
+          dashboard. Type a URL here only to pin a specific platform.</span>
       </label>
     </section>
 
-    <section class="panel">
+    <details class="panel advanced">
+      <summary>Advanced</summary>
+
       <h2>Platform session</h2>
       <p class="muted" id="session-status">Checking…</p>
       <div class="row">
@@ -47,15 +43,13 @@
         <span class="hint">Used only when automatic capture fails. Stored locally in
           the browser, never synced.</span>
       </label>
-    </section>
 
-    <section class="panel">
       <h2>Diagnostics</h2>
       <div class="row">
         <button class="btn" id="btn-health">Test connection</button>
       </div>
       <pre class="diagnostics" id="diagnostics">Not tested yet.</pre>
-    </section>
+    </details>
 
     <footer class="row actions">
       <button class="btn primary" id="btn-save">Save</button>

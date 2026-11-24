@@ -1,4 +1,4 @@
-# extension — Application Management Assistant browser extension (Chrome MV3)
+# extension — Virtuozzo Application Management Assistant browser extension (Chrome MV3)
 
 The AI assistant for the Virtuozzo Application Manager dashboard: a floating
 **AI Assistant** button on dashboard pages, a streaming chat side panel with

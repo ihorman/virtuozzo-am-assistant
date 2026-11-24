@@ -1,4 +1,4 @@
-# Application Management Assistant — MCP server + agent backend in one image.
+# Virtuozzo Application Management Assistant — MCP server + agent backend in one image.
 #
 # Build (from the repository root):
 #   docker build -t vap-copilot:0.1.0 -f deploy/Dockerfile .

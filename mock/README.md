@@ -59,7 +59,7 @@ environment not found, `2025` node not found, `2026` invalid parameter.
 `dashboard.html` is a static, offline Jelastic-style dashboard for extension
 development and smoke tests (marker `<meta name="vap-dashboard">`). Serve it
 with `python3 -m http.server 8788 --directory mock` and open
-`http://127.0.0.1:8788/dashboard.html?env=my-demo-env` — the Application Management Assistant FAB
+`http://127.0.0.1:8788/dashboard.html?env=my-demo-env` — the Virtuozzo Application Management Assistant FAB
 appears and captures the env context. See `extension/README.md`.
 
 ## Test support

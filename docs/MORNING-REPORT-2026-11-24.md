@@ -1,4 +1,4 @@
-# Morning report — Application Management Assistant (virtuozzo-am-assistant)
+# Morning report — Virtuozzo Application Management Assistant (virtuozzo-am-assistant)
 
 **Date:** 2026-11-24, ~03:30 EET · **For:** Ihor · **Repo:** `~/workspace/vap-copilot` (all commits **local only** — nothing pushed)
 

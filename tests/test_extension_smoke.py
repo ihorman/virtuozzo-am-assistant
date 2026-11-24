@@ -237,11 +237,12 @@ def wait_until(predicate, timeout: float = 15.0, interval: float = 0.1,
 
 
 def configure_agent(browser: Browser, agent_url: str) -> None:
-    """Point the extension at the mock agent via the options page."""
+    """Point the extension at the mock agent.
+
+    The agent URL is intentionally not user-facing (Options shows only the
+    Platform field), so tests set it through chrome.storage directly."""
     page = browser.page_for("options/options.html", viewport={"width": 900, "height": 800})
-    page.fill("#agent-url", agent_url)
-    page.click("#btn-save")
-    page.wait_for_selector("#save-note:not([hidden])")
+    page.evaluate("url => chrome.storage.sync.set({ agentUrl: url })", agent_url)
     page.close()
 
 
@@ -285,11 +286,21 @@ def test_fab_renders_on_mock_dashboard(browser, static_server):
 def test_options_page_configures_agent(browser, agent_server):
     web = browser()
     page = web.page_for("options/options.html", viewport={"width": 900, "height": 800})
-    page.fill("#agent-url", agent_server)
+
+    # New Options contract: only the Platform field is visible; the agent URL
+    # is internal and must NOT be rendered.
+    assert page.locator("#panel-host").is_visible()
+    assert page.locator("#agent-url").count() == 0, "agent URL must not be user-facing"
+
+    page.fill("#panel-host", "https://panel.example.com")
     shot(page, "options-dark")
     page.click("#btn-save")
     page.wait_for_selector("#save-note:not([hidden])")
+    stored = page.evaluate("() => chrome.storage.sync.get('panelHost')")
+    assert stored.get("panelHost") == "https://panel.example.com"
 
+    page.evaluate("url => chrome.storage.sync.set({ agentUrl: url })", agent_server)
+    page.evaluate("() => { document.querySelector('details.advanced').open = true; }")
     page.click("#btn-health")
     diagnostics = page.locator("#diagnostics")
     wait_until(lambda: "reachable" in diagnostics.inner_text(),

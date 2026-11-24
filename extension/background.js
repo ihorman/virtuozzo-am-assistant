@@ -1,4 +1,4 @@
-/* Application Management Assistant — background service worker.
+/* Virtuozzo Application Management Assistant — background service worker.
  *
  * Responsibilities (docs/PLAN.md §4):
  *   - settings (chrome.storage.sync) + session token (chrome.storage.local)
@@ -110,6 +110,17 @@ async function handleMessage(message, sender) {
     case "page-context": {
       if (message.context) {
         await chrome.storage.local.set({ lastContext: message.context });
+        /* Auto-detect the platform host from the dashboard page when the
+         * user has not pinned one in Options. */
+        const settings = await getSettings();
+        if (!settings.panelHost && message.context.url) {
+          try {
+            const origin = new URL(message.context.url).origin;
+            await chrome.storage.sync.set({ panelHost: origin });
+          } catch (_err) {
+            /* not a URL — ignore */
+          }
+        }
       }
       return { ok: true };
     }

@@ -1,4 +1,4 @@
-/* Shared helpers for the Application Management Assistant extension (background + sidepanel).
+/* Shared helpers for the Virtuozzo Application Management Assistant extension (background + sidepanel).
  *
  * Plain classic script: loaded via importScripts() in the service worker and
  * via <script src> in the sidepanel. Everything hangs off the global
@@ -10,11 +10,11 @@ var VapApi = (() => {
 
   /** Defaults — "no configuration needed to start" (DESIGN.md UX rules). */
   const DEFAULT_SETTINGS = {
-    /* Hosted default agent endpoint (PLAN §7). */
+    /* Hosted default agent endpoint (PLAN §7) — not user-facing. */
     agentUrl: "https://office.bannoe.it/am-assistant",
-    /* The demo/VHC panel host, baked so first run is zero-config.
-     * Clear the field in Options to re-enable auto-detection. */
-    panelHost: "https://app.vhc.virtuozzo.com",
+    /* Empty = auto-detect: the content script pins this to the dashboard's
+     * origin on first visit; type a URL in Options to pin it manually. */
+    panelHost: "",
   };
 
   /* ------------------------------------------------------------------

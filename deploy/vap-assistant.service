@@ -1,5 +1,5 @@
 [Unit]
-Description=Application Management Assistant assistant (agent + MCP, uvicorn)
+Description=Virtuozzo Application Management Assistant (agent + MCP, uvicorn)
 Documentation=https://github.com/ihorman/vap-copilot
 After=network-online.target
 Wants=network-online.target

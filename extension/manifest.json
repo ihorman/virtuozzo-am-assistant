@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Application Management Assistant",
+  "name": "Virtuozzo Application Management Assistant",
   "version": "0.1.0",
   "description": "AI assistant for the Virtuozzo Application Manager dashboard — deploy, scale and troubleshoot from a side panel.",
   "minimum_chrome_version": "116",
@@ -22,7 +22,7 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "action": {
-    "default_title": "Application Management Assistant",
+    "default_title": "Virtuozzo Application Management Assistant",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",

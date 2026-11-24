@@ -1,4 +1,4 @@
-"""FastAPI app for the Application Management Assistant agent backend (docs/API-CONTRACT.md).
+"""FastAPI app for the Virtuozzo Application Management Assistant agent backend (docs/API-CONTRACT.md).
 
 Routes:
 - ``POST /api/chat``   — SSE stream (events exactly per the frozen contract)
@@ -63,7 +63,7 @@ def create_app(settings: Optional[Settings] = None, *,
                transport: Optional[httpx.AsyncBaseTransport] = None,
                verifier: Optional[Verifier] = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    app = FastAPI(title="Application Management Assistant agent", version="0.1.0",
+    app = FastAPI(title="Virtuozzo Application Management Assistant agent", version="0.1.0",
                   docs_url=None, redoc_url=None)
     registry = ConversationRegistry()
     app.state.settings = settings

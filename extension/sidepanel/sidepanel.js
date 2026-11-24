@@ -1,4 +1,4 @@
-/* Application Management Assistant — sidepanel chat UI.
+/* Virtuozzo Application Management Assistant — sidepanel chat UI.
  *
  * Streams one turn per user message from the agent (`POST /api/chat`, SSE),
  * renders every contract event (docs/API-CONTRACT.md v1.1/1.2) as a designed
