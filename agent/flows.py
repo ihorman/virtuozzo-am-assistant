@@ -23,7 +23,7 @@ from typing import Optional, Tuple
 from .context import FlowContext, match_option
 from .diagnose import diagnose, repair_plan_is_safe
 from .tools import ToolOutcome
-from .tools_util import SECRET_VAR_RE, mask_value
+from .tools_util import SECRET_VAR_RE, mask_value, slugify_env_name
 
 from mcp.tools import TOOLS
 
@@ -78,7 +78,7 @@ def _normalize_db(answer: str) -> Optional[str]:
     for key, node_type in _ENGINES.items():
         if key in lowered:
             version = None
-            found = _CLOUDLET_RE.search(answer)
+            found = re.search(r"\d+(\.\d+)*", answer)
             if found:
                 version = found.group(0)
             version = version or _ENGINE_VERSIONS.get(node_type, "")
@@ -87,7 +87,7 @@ def _normalize_db(answer: str) -> Optional[str]:
 
 
 def _normalize_engine(answer: str) -> Optional[str]:
-    mapped = match_option(answer, ["MySQL", "PostgreSQL", "MongoDB", "Redis"])
+    mapped = match_option(answer, ["MySQL", "MariaDB", "PostgreSQL", "MongoDB", "Redis"])
     lowered = mapped.lower()
     for key, node_type in _ENGINES.items():
         if key in lowered:
@@ -415,7 +415,7 @@ async def deploy_app(ctx: FlowContext) -> None:
 
     # 2. target environment ------------------------------------------------
     creating = False
-    env_name = str(p.get("env_name") or "").strip()
+    env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
     if env_name:
         probe = await ctx.run_tool("env_info", {"env_name": env_name})
         creating = not probe.ok
@@ -460,7 +460,8 @@ async def deploy_app(ctx: FlowContext) -> None:
     else:
         db = _normalize_db(await ctx.ask(
             "Would you like a database with it?",
-            ["No database", "MySQL 8.0", "PostgreSQL 16", "Redis 7.2"]))
+            ["No database", "MySQL 8.0", "MariaDB 10.11", "PostgreSQL 16",
+             "Redis 7.2"]))
 
     # 4. resources ---------------------------------------------------------
     cloudlets = _parse_cloudlets(str(p["cloudlets"])) if p.get("cloudlets") \
@@ -565,7 +566,11 @@ async def deploy_app(ctx: FlowContext) -> None:
 async def db_add(ctx: FlowContext) -> None:
     p = ctx.params
 
-    env_name = str(p.get("env_name") or "").strip()
+    env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
+    if env_name:
+        probe = await ctx.run_tool("env_info", {"env_name": env_name})
+        if not probe.ok:
+            env_name = ""   # unknown target — fall through to the picker
     if not env_name:
         listed = await ctx.run_tool("envs_list", {})
         names = [str(e.get("envName")) for e in
@@ -577,7 +582,7 @@ async def db_add(ctx: FlowContext) -> None:
     engine = _normalize_engine(str(p.get("engine") or "")) if p.get("engine") \
         else _normalize_engine(await ctx.ask(
             "Which database engine?",
-            ["MySQL", "PostgreSQL", "MongoDB", "Redis"]))
+            ["MySQL", "MariaDB", "PostgreSQL", "MongoDB", "Redis"]))
     engine = engine or "mysql"
 
     version = str(p.get("version") or "").strip() or _parse_version(
@@ -647,7 +652,7 @@ async def db_add(ctx: FlowContext) -> None:
 async def scale(ctx: FlowContext) -> None:
     p = ctx.params
 
-    env_name = str(p.get("env_name") or "").strip()
+    env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
     if not env_name:
         listed = await ctx.run_tool("envs_list", {})
         names = [str(e.get("envName")) for e in
@@ -718,7 +723,7 @@ async def scale(ctx: FlowContext) -> None:
 async def troubleshoot(ctx: FlowContext) -> None:
     p = ctx.params
 
-    env_name = str(p.get("env_name") or "").strip()
+    env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
     if not env_name:
         listed = await ctx.run_tool("envs_list", {})
         names = [str(e.get("envName")) for e in
@@ -815,7 +820,7 @@ async def dispatch(ctx: FlowContext, flow: str, params: Optional[dict] = None
     """Run one guided flow by name. Returns False when the flow is unknown."""
     ctx.params.update(params or {})
     if flow == "security_review":
-        env_name = str(ctx.params.get("env_name") or "").strip()
+        env_name = slugify_env_name(str(ctx.params.get("env_name") or "")) if ctx.params.get("env_name") else ""
         if not env_name:
             listed = await ctx.run_tool("envs_list", {})
             names = [str(e.get("envName")) for e in

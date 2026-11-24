@@ -305,6 +305,27 @@ class SsrfGuard:
 
 # --- input validation (T5) ---------------------------------------------------
 
+#: platform env names: lowercase letter, then letters/digits/dashes (<=30)
+ENV_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
+
+
+def slugify_env_name(name: str) -> str:
+    """Coerce free text into a valid platform env name (ENV_NAME_RE).
+
+    Applied to every ``env_name`` tool argument before validation: the
+    platform rejects names that are too long or carry foreign chars, and a
+    user/assistant-generated name must never hard-fail on shape alone.
+    Identity for names that are already valid."""
+    if not (name or "").strip():
+        return "app"
+    slug = re.sub(r"[^a-z0-9-]+", "-", (name or "").lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not slug or not slug[0].isalpha():
+        slug = ("e-" + slug).strip("-")
+    slug = slug[:30].rstrip("-")
+    return slug or "app"
+
+
 def validate_args(schema: Mapping[str, Any], args: Mapping[str, Any],
                   tool: str = "tool") -> None:
     """Enforce a tool's JSON schema caps; reject unknown parameters.

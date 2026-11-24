@@ -17,11 +17,13 @@ never touch secrets). Unsafe plans are refused even if registered.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .context import FlowContext
 from .tools import ToolOutcome
+from .tools_util import slugify_env_name
 
 #: tools a repair plan may never use (destructive / security-relevant).
 #: ssl_letsencrypt is deliberately allowed: it strengthens security.
@@ -170,9 +172,25 @@ def _sanitize_manifest(jps: str) -> str:
 
 
 def _build_repair_plan(error_code: str, tool: Optional[str],
-                       args: Optional[dict]) -> Optional[dict]:
+                       args: Optional[dict],
+                       summary: str = "") -> Optional[dict]:
     """Template repair plan for a repairable failure class (or None)."""
     args = dict(args or {})
+    if args.get("env_name") and re.search(
+            r"env_name.*(at most|match|character)|must be at most|"
+            r"must match pattern", summary or ""):
+        fixed = dict(args)
+        fixed["env_name"] = slugify_env_name(str(args.get("env_name")))
+        if fixed["env_name"] != args.get("env_name") and tool:
+            return {
+                "class": "fix_env_name",
+                "recap": (f"Shorten the environment name to "
+                          f"`{fixed['env_name']}` and run [{tool}] again"),
+                "steps": [{"tool": tool, "args": fixed}],
+                "verify": {"tool": "env_info",
+                           "args": {"env_name": fixed["env_name"]}},
+            }
+        return None
     if error_code == "domain_unavailable" and tool == "env_create":
         new_args = dict(args)
         new_args.pop("env_name", None)   # filled by the apply step (asks)
@@ -226,11 +244,34 @@ async def diagnose(ctx: FlowContext, outcome: ToolOutcome, *,
     category, explanation, repairable = _CLASSIFY.get(
         error_code, _DEFAULT_CLASS)
 
-    evidence = await gather_evidence(ctx, env_name)
+    summary = str(getattr(outcome, "summary", "") or "")
+    name_issue = (
+        error_code in ("invalid_parameter", "bad_request", "param_rejected")
+        and bool(step_args and step_args.get("env_name"))
+        and re.search(r"env_name.*(at most|match|character)|must be at most|"
+                      r"must match pattern", summary))
+    if name_issue:
+        slug = slugify_env_name(str((step_args or {}).get("env_name")))
+        category = "invalid_env_name"
+        explanation = (
+            "The environment name I used is not valid on this platform — "
+            "names are lowercase letters, digits and dashes, up to 30 "
+            f"characters. I can shorten it to `{slug}` and retry.")
+        repairable = True
+
+    if name_issue:
+        # env_info/env_stats/logs would fail on the same bad name — one
+        # honest line instead of three identical raw errors.
+        evidence = [{"label": "name", "ok": False,
+                     "summary": ("environment name is not a valid platform "
+                                 "name")}]
+    else:
+        evidence = await gather_evidence(ctx, env_name)
 
     repair_plan = None
     if repairable:
-        candidate = _build_repair_plan(error_code, outcome.name, step_args)
+        candidate = _build_repair_plan(error_code, outcome.name, step_args,
+                                       summary=summary)
         if repair_plan_is_safe(candidate):
             repair_plan = candidate
 

@@ -29,6 +29,12 @@ def mask_value(value: Any) -> str:
     return MASK
 
 
+#: platform env names: lowercase letter, then letters/digits/dashes (<=30).
+#: Canonical implementation lives in mcp/security (shared with the tool layer
+#: and the standalone MCP server); re-exported here for the agent flows.
+from mcp.security import ENV_NAME_RE, slugify_env_name  # noqa: F401
+
+
 def mask_args(name: str, args: dict) -> dict:
     """Mask secret-bearing arguments for the ``tool_call`` event."""
     masked: dict = {}

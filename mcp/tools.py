@@ -212,8 +212,8 @@ def _schema(properties: dict, required=(), *, mutating: bool) -> dict:
 _ENV_NAME = {
     "type": "string",
     "description": "Environment name (its subdomain label, e.g. 'my-app').",
-    "pattern": r"^[a-z0-9][a-z0-9-]{2,32}$",
-    "maxLength": 32,
+    "pattern": r"^[a-z0-9][a-z0-9-]{2,62}$",
+    "maxLength": 63,
 }
 
 # Anchored validation patterns (docs/SECURITY.md mitigation 4).

@@ -313,7 +313,7 @@ FUZZ_INVALID = [
     ("env_info", {"env_name": "ab"}),
     ("env_info", {"env_name": "UPPERCASE"}),
     ("env_info", {"env_name": "has space"}),
-    ("env_info", {"env_name": "a" * 33}),
+    ("env_info", {"env_name": "a" * 64}),   # over the 63-char cap
     ("env_info", {"env_name": "env;rm -rf /"}),
     ("env_info", {"env_name": "../../etc"}),
     ("env_info", {"env_name": "my.env"}),
