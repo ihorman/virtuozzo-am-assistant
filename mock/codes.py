@@ -1,9 +1,11 @@
 """Result and status codes for the mock Jelastic REST API.
 
-Result codes are faithful to the real Jelastic/VAP catalog where documented
-(see docs/PLAN.md references): 0 success, 1 unknown error, 9/501 session
-invalid, 701 authentication failed, 2212 deletion already in progress,
-2314 domain not available, 4109 operation failed, 4132 execution timed out,
+Result codes follow the live VHC 8.15.1 catalog where verified (see
+docs/live-api-notes.md and the T7 live-probe checkpoint): 0 success,
+1 unknown error, 3 invalid parameter, 9/501 session invalid, 11 not found
+(ghost env), 701 authentication failed, 724 "Confirmation failed" (deleteenv
+without the typed passphrase), 2212 deletion already in progress, 2314
+domain not available, 4109 operation failed, 4132 execution timed out,
 11001 JPS manifest corrupted.
 
 Codes marked "mock-defined" have no verified real-stand equivalent; they are
@@ -11,12 +13,15 @@ stable identifiers for this mock so tests and the client can map them without
 scraping error text.
 """
 
-# --- Result codes (real catalog) -------------------------------------------
+# --- Result codes (live VHC 8.15.1 catalog) --------------------------------
 OK = 0
 UNKNOWN_ERROR = 1                 # unknown error / authorization failed
+INVALID_PARAMETER = 3             # missing/invalid parameter (verified live)
 SESSION_EXPIRED_LEGACY = 9        # session expired (older stands)
+ENV_NOT_FOUND = 11                # environment does not exist (verified live)
 SESSION_INVALID = 501             # session missing/unknown/expired (T2 spec)
 AUTH_FAILED = 701                 # authentication failed (bad login/password)
+CONFIRMATION_FAILED = 724         # deleteenv without passphrase=<envName>
 DELETE_IN_PROGRESS = 2212         # environment is already being deleted
 DOMAIN_UNAVAILABLE = 2314         # domain/env name not available
 OPERATION_FAILED = 4109           # installation/operation failed
@@ -24,9 +29,7 @@ EXECUTION_TIMEOUT = 4132          # JPS cmd action exceeded time limit
 MANIFEST_CORRUPTED = 11001        # JPS manifest YAML corrupted / not parsed
 
 # --- Result codes (mock-defined) -------------------------------------------
-ENV_NOT_FOUND = 2024              # mock-defined: environment does not exist
 NODE_NOT_FOUND = 2025             # mock-defined: node does not exist
-INVALID_PARAMETER = 2026          # mock-defined: missing/invalid parameter
 
 # Session problems the client must treat as "re-authenticate".
 SESSION_CODES = (SESSION_INVALID, SESSION_EXPIRED_LEGACY)

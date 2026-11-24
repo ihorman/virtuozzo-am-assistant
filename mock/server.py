@@ -13,12 +13,13 @@ Implements the request conventions of the real platform:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .codes import OK
+from .codes import INVALID_PARAMETER, OK
 from .state import MockJelastic
 
 API_PREFIX = "/1.0/"
@@ -38,7 +39,15 @@ async def _collect_params(request: Request) -> dict:
         for key, value in form.multi_items():
             # File uploads (deployarchive): keep the filename only.
             filename = getattr(value, "filename", None)
-            params[key] = filename if filename is not None else value
+            value = filename if filename is not None else value
+            # Classic Jelastic carries structured params (env, nodes, vars) as
+            # JSON strings inside form fields; decode objects/arrays.
+            if isinstance(value, str) and value[:1] in "[{":
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
+            params[key] = value
     for key, value in request.query_params.multi_items():
         params[key] = value
     return params
@@ -58,6 +67,7 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
 
     def dispatch(method: str, p: dict) -> JSONResponse:
         st: MockJelastic = app.state.jelastic
+        st.calls.append(method)  # recorded for routing assertions in tests
         if method == "users/authentication/rest/signin":
             return _envelope(*st.signin(p.get("login"), p.get("password")))
         if method == "users/authentication/rest/signout":
@@ -69,8 +79,9 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
             return _envelope(*st.getenvs(p.get("session")))
         if method == "environment/control/rest/getenvinfo":
             return _envelope(*st.getenvinfo(p.get("session"), p.get("envName")))
-        if method == "environment/control/rest/getenvstat":
-            return _envelope(*st.getenvstat(p.get("session"), p.get("envName")))
+        # Live method name is getsumstat (getenvstat 404s on VHC 8.15.1).
+        if method == "environment/control/rest/getsumstat":
+            return _envelope(*st.getsumstat(p.get("session"), p.get("envName")))
         if method in ("environment/control/rest/createenvironment",
                       "environment/control/rest/createenv"):
             return _envelope(*st.createenvironment(
@@ -83,10 +94,16 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
             return _envelope(*st.sleepenv(p.get("session"), p.get("envName")))
         if method == "environment/control/rest/deleteenv":
             return _envelope(*st.deleteenv(
-                p.get("session"), p.get("envName"), p.get("password")))
+                p.get("session"), p.get("envName"), p.get("password"),
+                p.get("passphrase")))
         if method == "environment/control/rest/changetopology":
             return _envelope(*st.changetopology(
-                p.get("session"), p.get("envName"), p.get("nodes")))
+                p.get("session"), p.get("envName"), p.get("nodes"),
+                p.get("env")))
+        if method == "environment/control/rest/applynodegroupdata":
+            return _envelope(*st.applynodegroupdata(
+                p.get("session"), p.get("envName"), p.get("nodeGroup"),
+                p.get("data")))
         if method == "environment/control/rest/setcloudletscountbyid":
             return _envelope(*st.setcloudletscountbyid(
                 p.get("session"), p.get("envName"), p.get("nodeId"),
@@ -96,7 +113,7 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
                       "environment/control/rest/deployapp"):
             return _envelope(*st.deployarchive(
                 p.get("session"), p.get("envName"), p.get("context"),
-                p.get("url"), p.get("archive"), p.get("nodeGroup")))
+                p.get("fileUrl"), p.get("fileName"), p.get("nodeGroup")))
 
         if method == "marketplace/jps/rest/install":
             return _envelope(*st.install_jps(
@@ -105,20 +122,32 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
 
         if method == "environment/control/rest/getlogs":
             return _envelope(*st.getlogs(
-                p.get("session"), p.get("envName"), p.get("limit")))
-        if method in ("environment/control/rest/getenvvariables",
-                      "environment/control/rest/getcontainerenvvars"):
-            return _envelope(*st.getenvvariables(p.get("session"), p.get("envName")))
-        if method in ("environment/control/rest/setenvvariables",
-                      "environment/control/rest/setcontainerenvvars"):
-            return _envelope(*st.setenvvariables(
-                p.get("session"), p.get("envName"), p.get("vars")))
-        if method in ("environment/control/rest/addcontainerenvvars",):
-            return _envelope(*st.addenvvariable(
-                p.get("session"), p.get("envName"), p.get("name"), p.get("value")))
-        if method in ("environment/control/rest/removecontainerenvvars",):
-            return _envelope(*st.removeenvvariable(
-                p.get("session"), p.get("envName"), p.get("name")))
+                p.get("session"), p.get("envName"), p.get("nodeId")))
+        if method == "environment/control/rest/readlog":
+            return _envelope(*st.readlog(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path"), p.get("line")))
+        if method == "environment/control/rest/getlogslist":
+            return _envelope(*st.getlogslist(
+                p.get("session"), p.get("envName"), p.get("nodeId")))
+        if method == "environment/control/rest/getcontainerenvvars":
+            return _envelope(*st.getcontainerenvvars(
+                p.get("session"), p.get("envName"), p.get("nodeId")))
+        if method == "environment/control/rest/getcontainerenvvarsbygroup":
+            return _envelope(*st.getcontainerenvvarsbygroup(
+                p.get("session"), p.get("envName"), p.get("nodeGroup")))
+        if method == "environment/control/rest/setcontainerenvvarsbygroup":
+            return _envelope(*st.setcontainerenvvarsbygroup(
+                p.get("session"), p.get("envName"), p.get("nodeGroup"),
+                p.get("data")))
+        if method == "environment/control/rest/addcontainerenvvars":
+            return _envelope(*st.addcontainerenvvars(
+                p.get("session"), p.get("envName"), p.get("nodeGroup"),
+                p.get("vars")))
+        if method == "environment/control/rest/removecontainerenvvars":
+            return _envelope(*st.removecontainerenvvars(
+                p.get("session"), p.get("envName"), p.get("name"),
+                p.get("nodeGroup")))
 
         if method == "marketplace/app/rest/getcategories":
             return _envelope(*st.getcategories(p.get("session")))
@@ -137,6 +166,12 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
 
     @app.api_route(API_PREFIX + "{path:path}", methods=["GET", "POST"])
     async def api(request: Request, path: str):
+        # VHC/hx-core reads POST parameters from the form channel only: a JSON
+        # body yields "invalid parameter [session]" (verified live).
+        if request.method == "POST" and "application/json" in \
+                request.headers.get("content-type", ""):
+            return _envelope(INVALID_PARAMETER,
+                             {"error": "invalid parameter [session]"})
         params = await _collect_params(request)
         return dispatch(path.strip("/"), params)
 

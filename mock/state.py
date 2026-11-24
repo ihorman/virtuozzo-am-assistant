@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 
 from .codes import (
     AUTH_FAILED,
+    CONFIRMATION_FAILED,
     DELETE_IN_PROGRESS,
     DOMAIN_UNAVAILABLE,
     ENV_NOT_FOUND,
@@ -177,25 +178,38 @@ class Env:
         return self.status == "__removed__"
 
     def to_summary(self) -> dict:
+        # Live shape (VHC 8.15.1): numeric status only - there is NO
+        # statusName field; the client synthesizes one.
         return {
             "envName": self.name,
             "displayName": self.display_name or self.name,
             "domain": self.domain,
             "status": STATUS_CODES.get(self.status, -1),
-            "statusName": self.status,
             "region": self.region,
             "engine": self.engine,
             "created": self.created,
         }
 
-    def to_info(self) -> dict:
-        info = self.to_summary()
-        info["nodes"] = [n.to_dict() for n in self.nodes]
-        info["envVars"] = dict(self.env_vars)
-        info["app"] = dict(self.app) if self.app else None
-        info["installations"] = [dict(i) for i in self.installations]
-        info["ssl"] = dict(self.ssl) if self.ssl else None
-        return info
+    def to_env(self) -> dict:
+        """The env object incl. mock extension fields (vars/app/installs/ssl)."""
+        env = self.to_summary()
+        env["envVars"] = dict(self.env_vars)
+        env["app"] = dict(self.app) if self.app else None
+        env["installations"] = [dict(i) for i in self.installations]
+        env["ssl"] = dict(self.ssl) if self.ssl else None
+        return env
+
+    def to_node_groups(self) -> list:
+        groups = []
+        seen = set()
+        for node in self.nodes:
+            if node.node_group not in seen:
+                seen.add(node.node_group)
+                groups.append({"name": node.node_group,
+                               "displayName": node.node_group,
+                               "templateType": "NATIVE",
+                               "scalingMode": "STATELESS"})
+        return groups
 
 
 class MockJelastic:
@@ -206,6 +220,8 @@ class MockJelastic:
         self.sessions: dict[str, float] = {}  # token -> expiry (clock)
         self.envs: dict[str, Env] = {}
         self._next_node_id = 1001
+        #: REST method names seen by the server (for routing assertions).
+        self.calls: list = []
 
     # -- helpers ------------------------------------------------------------
 
@@ -299,19 +315,42 @@ class MockJelastic:
         code, env = self._get_env(env_name)
         if env is None:
             return code, {"error": f"environment [{env_name}] not found"}
-        return OK, {"env": env.to_info()}
+        # Live shape (VHC 8.15.1): env/nodes/nodeGroups flat at top level.
+        return OK, {"env": env.to_env(),
+                    "nodes": [n.to_dict() for n in env.nodes],
+                    "nodeGroups": env.to_node_groups()}
 
-    def getenvstat(self, session: Optional[str], env_name: Optional[str]):
+    def getsumstat(self, session: Optional[str], env_name: Optional[str]):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
         code, env = self._get_env(env_name)
         if env is None:
             return code, {"error": f"environment [{env_name}] not found"}
-        nodes = [
-            {"nodeId": n.id, "nodeGroup": n.node_group, **n.stats} for n in env.nodes
-        ]
-        return OK, {"envName": env.name, "nodes": nodes}
+        # Live shape: one stats row per node plus an aggregate "sum" row
+        # (lowercase "nodeid"), and appid/status on the envelope.
+        stats = []
+        for n in env.nodes:
+            stats.append({
+                "nodeid": str(n.id), "nodeGroup": n.node_group,
+                "cpu": n.stats["cpu"], "mem": n.stats["ram"],
+                "memTotal": 100.0, "disk": n.stats["disk"],
+                "capacity": n.fixed_cloudlets + n.flexible_cloudlets,
+                "cloudletsused": n.fixed_cloudlets + n.flexible_cloudlets,
+                "net": {"in_ext": 0, "in_int": 0, "out_int": 0, "out_ext": 0},
+                "vType": "CT",
+            })
+        if stats:
+            stats.append({
+                "nodeid": "sum",
+                "cpu": sum(s["cpu"] for s in stats) / len(stats),
+                "mem": sum(s["mem"] for s in stats),
+                "memTotal": sum(s["memTotal"] for s in stats),
+                "disk": sum(s["disk"] for s in stats),
+                "capacity": sum(s["capacity"] for s in stats),
+            })
+        return OK, {"stats": stats, "appid": f"mock-{env.name}",
+                    "status": STATUS_CODES.get(env.status, -1)}
 
     def createenvironment(self, session: Optional[str], env: Optional[dict],
                           nodes: Optional[list]):
@@ -396,10 +435,14 @@ class MockJelastic:
         return self._lifecycle(session, env_name, "SleepEnv",
                                ("running",), "sleeping", "sleep")
 
-    def deleteenv(self, session, env_name, password):
+    def deleteenv(self, session, env_name, password, passphrase=None):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
+        # Verified live: deleteenv needs the typed confirmation
+        # passphrase=<envName> - result 724 "Confirmation failed" without it.
+        if passphrase != env_name:
+            return CONFIRMATION_FAILED, {"error": "Confirmation failed"}
         # The real API rejects a missing password parameter before anything else.
         if password is None or password == "":
             return INVALID_PARAMETER, {
@@ -423,13 +466,20 @@ class MockJelastic:
 
     # -- topology & scaling --------------------------------------------------
 
-    def changetopology(self, session, env_name, nodes):
+    def changetopology(self, session, env_name, nodes, env=None):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
-        code, env = self._get_env(env_name)
-        if env is None:
+        # Verified live: changetopology requires the env descriptor
+        # {"region": "", "sslstate": false} - "invalid parameter [env]" without.
+        if not isinstance(env, dict):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [env] for method [ChangeTopology]"
+            }
+        code, env_obj = self._get_env(env_name)
+        if env_obj is None:
             return code, {"error": f"environment [{env_name}] not found"}
+        env = env_obj
         if env.status == "deleting" or env.removed:
             return DELETE_IN_PROGRESS, {
                 "error": f"environment [{env_name}] is being deleted"
@@ -504,10 +554,10 @@ class MockJelastic:
         self._log(env, f"node {node_id} cloudlets set to {fixed}/{flexible}")
         return OK, {"envName": env.name, "node": node.to_dict()}
 
-    # -- deployment ----------------------------------------------------------
-
-    def deployarchive(self, session, env_name, context=None, url=None,
-                      archive=None, node_group=None):
+    def applynodegroupdata(self, session, env_name, node_group, data=None):
+        # Verified live shape: nodeGroup + data={"count","fixedCloudlets",
+        # "flexibleCloudlets"}. Existing groups only (editnodegroup answers
+        # 1102 for adds - use changetopology to add nodes).
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
@@ -518,9 +568,73 @@ class MockJelastic:
             return DELETE_IN_PROGRESS, {
                 "error": f"environment [{env_name}] is being deleted"
             }
-        if not url and not archive:
+        if not isinstance(data, dict):
             return INVALID_PARAMETER, {
-                "error": "invalid parameter [url] for method [DeployApp]"
+                "error": "invalid parameter [data] for method [ApplyNodeGroupData]"
+            }
+        group = str(node_group or "")
+        in_group = [n for n in env.nodes if n.node_group == group]
+        if not in_group:
+            return INVALID_PARAMETER, {
+                "error": f"invalid parameter [nodeGroup] for method "
+                         f"[ApplyNodeGroupData]"
+            }
+        try:
+            count = int(data.get("count", len(in_group)) or len(in_group))
+        except (TypeError, ValueError):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [count] for method "
+                         "[ApplyNodeGroupData]"
+            }
+        now = self._now()
+        ready_at = now + self.config.transition_seconds
+        while len(in_group) > count:
+            env.nodes.remove(in_group.pop())
+        while len(in_group) < count:
+            node = Node(
+                id=self._new_node_id(),
+                node_type=in_group[0].node_type,
+                node_group=group,
+                display_name=in_group[0].display_name,
+                fixed_cloudlets=int(data.get("fixedCloudlets",
+                                             in_group[0].fixed_cloudlets) or 1),
+                flexible_cloudlets=int(data.get("flexibleCloudlets",
+                                                in_group[0].flexible_cloudlets)
+                                       or 7),
+                status="updating",
+                pending=(ready_at, "ok"),
+            )
+            env.nodes.append(node)
+            in_group.append(node)
+        for node in in_group:
+            node.fixed_cloudlets = int(data.get("fixedCloudlets",
+                                                node.fixed_cloudlets) or 1)
+            node.flexible_cloudlets = int(data.get("flexibleCloudlets",
+                                                   node.flexible_cloudlets) or 7)
+            node.status = "updating"
+            node.pending = (ready_at, "ok")
+        self._log(env, f"node group {group} scaled to count={count}")
+        return OK, {"envName": env.name, "nodeGroup": group,
+                    "nodes": [n.to_dict() for n in in_group]}
+
+    # -- deployment ----------------------------------------------------------
+
+    def deployarchive(self, session, env_name, context=None, fileUrl=None,
+                      fileName=None, node_group=None, **_ignored):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if env.status == "deleting" or env.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{env_name}] is being deleted"
+            }
+        # Verified live shape: fileUrl + fileName (url/archive are rejected).
+        if not fileUrl and not fileName:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [fileUrl] for method [DeployApp]"
             }
         if env.status != "running":
             return INVALID_PARAMETER, {
@@ -529,12 +643,12 @@ class MockJelastic:
         context = context or "ROOT"
         env.app = {
             "context": context,
-            "url": url,
-            "archive": archive,
+            "fileUrl": fileUrl,
+            "fileName": fileName,
             "nodeGroup": node_group,
             "deployedAt": self._now(),
         }
-        self._log(env, f"deployed {url or archive} to context {context}")
+        self._log(env, f"deployed {fileUrl or fileName} to context {context}")
         return OK, {"domain": env.domain, "context": context}
 
     def install_jps(self, session, jps, env_name=None, settings=None,
@@ -582,64 +696,166 @@ class MockJelastic:
             "response": {"domain": env.domain, "responses": []},
         }
 
-    # -- logs & variables ----------------------------------------------------
+    # -- logs (live shapes: getlogs listing, readlog content, getlogslist) ---
 
-    def getlogs(self, session, env_name, limit=None, **_ignored):
+    def _log_files(self, env: "Env") -> list:
+        return [
+            {"path": f"/var/log/{env.name}.log", "name": f"{env.name}.log",
+             "size": sum(len(line) for line in env.logs), "isExported": False,
+             "permission": "rwd", "lastModified": "", "isdir": False,
+             "fileType": "-"},
+            {"path": "/var/log/cron", "name": "cron", "size": 200,
+             "isExported": False, "permission": "rwd", "lastModified": "",
+             "isdir": False, "fileType": "-"},
+        ]
+
+    def _log_lines(self, env: "Env", path: str) -> Optional[list]:
+        if path == f"/var/log/{env.name}.log":
+            return list(env.logs)
+        if path == "/var/log/cron":
+            return ["(CRON) STARTUP (1.5.7)",
+                    "(CRON) INFO (running with inotify support)"]
+        return None
+
+    def _node_for_logs(self, env: "Env", node_id):
+        if node_id in (None, ""):
+            return None, (INVALID_PARAMETER, {
+                "error": "Parameter 'nodeid' is required."})
+        try:
+            node_id = int(node_id)
+        except (TypeError, ValueError):
+            return None, (INVALID_PARAMETER, {
+                "error": "Parameter 'nodeid' is required."})
+        node = next((n for n in env.nodes if n.id == node_id), None)
+        if node is None:
+            return None, (NODE_NOT_FOUND, {"error": f"node [{node_id}] not found"})
+        return node, None
+
+    def getlogs(self, session, env_name, node_id=None, **_ignored):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
         code, env = self._get_env(env_name)
         if env is None:
             return code, {"error": f"environment [{env_name}] not found"}
-        logs = env.logs
-        if limit:
-            try:
-                logs = logs[-int(limit):]
-            except (TypeError, ValueError):
-                return INVALID_PARAMETER, {
-                    "error": "invalid parameter [limit] for method [GetLogs]"
-                }
-        return OK, {"logs": list(logs)}
+        _, error = self._node_for_logs(env, node_id)
+        if error:
+            return error
+        # Live shape: keyword groups, each with its file entries.
+        files = self._log_files(env)
+        return OK, {"keywords": [{"keyword": name, "path": "/var/log",
+                                  "sourceNodeId": 0, "permission": "",
+                                  "files": [f]} for name, f in
+                                 ((f["name"], f) for f in files)]}
 
-    def getenvvariables(self, session, env_name):
+    def readlog(self, session, env_name, node_id=None, path=None, line=None,
+                **_ignored):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
         code, env = self._get_env(env_name)
         if env is None:
             return code, {"error": f"environment [{env_name}] not found"}
-        return OK, {"vars": dict(env.env_vars)}
-
-    def setenvvariables(self, session, env_name, vars):
-        code = self._auth(session)
-        if code != OK:
-            return code, {"error": "session expired or invalid"}
-        code, env = self._get_env(env_name)
-        if env is None:
-            return code, {"error": f"environment [{env_name}] not found"}
-        if not isinstance(vars, dict):
+        _, error = self._node_for_logs(env, node_id)
+        if error:
+            return error
+        if not path:
             return INVALID_PARAMETER, {
-                "error": "invalid parameter [vars] for method [SetEnvVariables]"
-            }
-        env.env_vars = {str(k): str(v) for k, v in vars.items()}
-        self._log(env, f"environment variables replaced ({len(env.env_vars)} keys)")
-        return OK, {"vars": dict(env.env_vars)}
+                "error": "Parameter 'path' is required."}
+        lines = self._log_lines(env, str(path))
+        if lines is None:
+            return INVALID_PARAMETER, {
+                "error": f"invalid parameter [path] for method [ReadLog]"}
+        try:
+            take = int(line) if line not in (None, "") else len(lines)
+        except (TypeError, ValueError):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [line] for method [ReadLog]"}
+        lines = lines[:max(0, take)]
+        body = "".join(f"{l}\n" for l in lines)
+        return OK, {"linescount": len(lines), "body": body}
 
-    def addenvvariable(self, session, env_name, name, value):
+    def getlogslist(self, session, env_name, node_id=None, **_ignored):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
         code, env = self._get_env(env_name)
         if env is None:
             return code, {"error": f"environment [{env_name}] not found"}
-        if not name:
-            return INVALID_PARAMETER, {
-                "error": "invalid parameter [name] for method [AddEnvVariable]"
-            }
-        env.env_vars[str(name)] = "" if value is None else str(value)
-        return OK, {"vars": dict(env.env_vars)}
+        _, error = self._node_for_logs(env, node_id)
+        if error:
+            return error
+        # Live shape: directory entries and file groups with items.
+        items = [{"path": f["path"], "size": f["size"], "name": f["name"],
+                  "permission": f["permission"], "type": "FILE"}
+                 for f in self._log_files(env)]
+        return OK, {"array": [{"path": "/var/log", "name": "app",
+                               "permission": "", "type": "GROUP",
+                               "items": items}]}
 
-    def removeenvvariable(self, session, env_name, name):
+    # -- container environment variables (live shapes) ----------------------
+
+    def getcontainerenvvars(self, session, env_name, node_id=None, **_ignored):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if node_id not in (None, ""):
+            _, error = self._node_for_logs(env, node_id)
+            if error:
+                return error
+        return OK, {"object": dict(env.env_vars)}
+
+    def getcontainerenvvarsbygroup(self, session, env_name, node_group=None,
+                                   **_ignored):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        return OK, {"object": dict(env.env_vars)}
+
+    def setcontainerenvvarsbygroup(self, session, env_name, node_group=None,
+                                   data=None, **_ignored):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        # Verified live shape: form data={"vars": {...}}.
+        variables = data.get("vars") if isinstance(data, dict) else None
+        if not isinstance(variables, dict):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [data] for method "
+                         "[SetContainerEnvVarsByGroup]"}
+        env.env_vars = {str(k): str(v) for k, v in variables.items()}
+        self._log(env, f"environment variables replaced "
+                       f"({len(env.env_vars)} keys)")
+        return OK, {"object": dict(env.env_vars)}
+
+    def addcontainerenvvars(self, session, env_name, node_group=None,
+                            vars=None, **_ignored):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        # Verified live shape: vars={"K":"V"}.
+        if not isinstance(vars, dict) or not vars:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [vars] for method "
+                         "[AddContainerEnvVars]"}
+        env.env_vars.update({str(k): "" if v is None else str(v)
+                             for k, v in vars.items()})
+        return OK, {"object": dict(env.env_vars)}
+
+    def removecontainerenvvars(self, session, env_name, name=None,
+                               node_group=None, **_ignored):
         code = self._auth(session)
         if code != OK:
             return code, {"error": "session expired or invalid"}
@@ -651,7 +867,7 @@ class MockJelastic:
                 "error": f"variable [{name}] not found"
             }
         del env.env_vars[str(name)]
-        return OK, {"vars": dict(env.env_vars)}
+        return OK, {"object": dict(env.env_vars)}
 
     # -- catalogs, quotas, SSL ----------------------------------------------
 

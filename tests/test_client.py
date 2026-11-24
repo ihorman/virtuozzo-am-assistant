@@ -24,6 +24,7 @@ from mcp.jelastic_client import (
     RESULT_CODE_MAP,
     SessionExpiredError,
 )
+from mock.codes import STATUS_CREATING
 from tests.helpers import run
 
 JPS_OK = "type: install\nname: hello\n"
@@ -107,7 +108,7 @@ def test_env_not_found_maps_to_environment_not_found(make_client):
             await client.signin("demo", "demo")
             with pytest.raises(EnvironmentNotFoundError) as exc:
                 await client.env_info("ghost")
-            assert exc.value.code == 2024
+            assert exc.value.code == 11  # live: ghost env -> result 11
     run(scenario())
 
 
@@ -165,7 +166,9 @@ def test_create_is_fire_and_forget_with_polling(make_client, state):
             body = await client.create_env("ff")
             assert body["result"] == 0  # acknowledged before completion
             info = await client.env_info("ff")
-            assert info["statusName"] == "creating"  # observable async state
+            # observable async state: live shape is numeric status only
+            assert info["status"] == STATUS_CREATING
+            assert info["statusName"] != "running"
             info = await client.wait_env_status("ff", "running", timeout=10)
             assert info["statusName"] == "running"
     run(scenario())
@@ -180,7 +183,7 @@ def test_wait_env_status_timeout_does_not_conclude_failure(make_client, state):
             with pytest.raises(OperationTimeout) as exc:
                 await client.wait_env_status("slowpoke", "running", timeout=0.2)
             # the observed state is carried, not a verdict of failure
-            assert exc.value.observed["statusName"] == "creating"
+            assert exc.value.observed["status"] == STATUS_CREATING
             assert "may still be running" in str(exc.value)
             # and the operation indeed still completes afterwards
             info = await client.wait_env_status("slowpoke", "running", timeout=10)
@@ -255,10 +258,18 @@ def test_deploy_jps_logs_and_variables(make_client):
             body = await client.install_jps("app", JPS_OK, settings={"k": "v"})
             assert body["result"] == 0
 
-            logs = await client.get_logs("app")
-            assert any("deployed" in line for line in logs)
-            assert any("JPS install" in line for line in logs)
+            # logs: getlogs is a keyword/file listing per node; the content
+            # of one file comes from readlog ({linescount, body}).
+            groups = await client.get_logs("app")
+            assert groups and groups[0]["files"][0]["path"].endswith(".log")
+            path = groups[0]["files"][0]["path"]
+            content = await client.read_log("app", path, line=5)
+            assert "deployed" in content["body"]
+            assert content["linescount"] >= 1
+            dirs = await client.get_logs_list("app")
+            assert dirs and dirs[0]["items"]
 
+            # variables: container env vars by node group (live wire shape)
             await client.set_env_variables("app", {"MODE": "prod"})
             assert await client.get_env_variables("app") == {"MODE": "prod"}
             await client.add_env_variable("app", "TIER", "web")
@@ -273,5 +284,7 @@ def test_env_stats_shape(make_client):
             await client.signin("demo", "demo")
             await setup_env(client, "stats")
             nodes = await client.env_stats("stats")
-            assert nodes and {"nodeId", "cpu", "ram", "disk"} <= set(nodes[0])
+            assert nodes and {"nodeid", "cpu", "mem", "disk"} <= set(nodes[0])
+            # the live aggregate "sum" row is not a node and is filtered out
+            assert all(str(n.get("nodeid")) != "sum" for n in nodes)
     run(scenario())

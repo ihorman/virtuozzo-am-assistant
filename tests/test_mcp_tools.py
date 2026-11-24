@@ -27,7 +27,7 @@ from mcp.protocol import (
 )
 from mcp.server import MCPServer, SERVER_NAME
 from mcp.tools import AuthConfig, NoCredentialsError, TOOLS
-from tests.helpers import TRANSITION, run, signin_raw
+from tests.helpers import TRANSITION, run, signin_raw, wait_status_raw
 
 # The frozen v1 tool surface from docs/PLAN.md section 2.
 PLAN_TOOLS = {
@@ -105,23 +105,18 @@ def snapshot(state) -> dict:
 
 
 def make_env(raw, session, name="mcp-test-env"):
-    """Create + settle an environment straight over REST."""
+    """Create + settle an environment straight over REST (live wire shape:
+    form-encoded POST with env/nodes as JSON strings)."""
     response = raw.post("/1.0/environment/control/rest/createenvironment",
-                        json={"session": session, "env": {"shortdomain": name},
-                              "nodes": [{"nodeType": "cp", "nodeGroup": "cp",
-                                         "fixedCloudlets": 1,
-                                         "flexibleCloudlets": 7}]})
+                        data={"session": session,
+                              "env": json.dumps({"shortdomain": name}),
+                              "nodes": json.dumps([
+                                  {"nodeType": "cp", "nodeGroup": "cp",
+                                   "fixedCloudlets": 1,
+                                   "flexibleCloudlets": 7}])})
     assert response.json()["result"] == 0
-    import time
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        body = raw.get("/1.0/environment/control/rest/getenvinfo",
-                       params={"session": session,
-                               "envName": name}).json()
-        if (body.get("env") or {}).get("statusName") == "running":
-            return name
-        time.sleep(TRANSITION / 2)
-    raise AssertionError(f"[{name}] never became running")
+    wait_status_raw(raw, session, name, "running")
+    return name
 
 
 # --- handshake / protocol core ---------------------------------------------
@@ -260,6 +255,77 @@ def test_envs_list_and_read_roundtrip(mcp_server, auth, raw, state):
     assert quotas["quotas"]["environments"]["usage"] == 1
 
 
+# --- live-shape coverage (VHC 8.15.1 wire shapes through the tool layer) ----
+
+
+def test_logs_read_listing_content_and_dirs(mcp_server, auth, raw, state):
+    make_env(raw, auth.session, name="mcp-test-logs")
+
+    listing = result_payload(call(mcp_server, auth, "logs_read",
+                                  {"env_name": "mcp-test-logs"}))
+    assert listing["count"] >= 1
+    path = listing["logs"][0]["files"][0]["path"]
+    assert path.startswith("/var/log/")
+
+    content = result_payload(call(mcp_server, auth, "logs_read",
+                                  {"env_name": "mcp-test-logs",
+                                   "path": path, "line": 5}))
+    assert content["linescount"] >= 1
+    assert "creation requested" in content["body"]
+    assert "untrusted" in content["body"]  # framed prose (T4)
+
+    dirs = result_payload(call(mcp_server, auth, "logs_read",
+                               {"env_name": "mcp-test-logs",
+                                "list_dirs": True}))
+    assert dirs["count"] >= 1 and dirs["dirs"][0]["items"]
+
+
+def test_env_var_get_set_container_groups(mcp_server, auth, raw, state):
+    make_env(raw, auth.session, name="mcp-test-vars")
+    got = result_payload(call(mcp_server, auth, "env_var_get",
+                              {"env_name": "mcp-test-vars"}))
+    assert got["vars"] == {} and got["node_group"] == "cp"
+    setr = result_payload(call(mcp_server, auth, "env_var_set", {
+        "env_name": "mcp-test-vars", "vars": {"MODE": "test"},
+        "node_group": "cp", "confirm": True}))
+    assert setr["vars"] == {"MODE": "test"}
+    got = result_payload(call(mcp_server, auth, "env_var_get",
+                              {"env_name": "mcp-test-vars"}))
+    assert got["vars"] == {"MODE": "test"}
+    # live wire path: (set|get)containerenvvarsbygroup, NOT setenvvariables
+    assert ("environment/control/rest/setcontainerenvvarsbygroup"
+            in state.calls)
+    assert ("environment/control/rest/getcontainerenvvarsbygroup"
+            in state.calls)
+
+
+def test_topology_change_routes_scaling_to_applynodegroupdata(mcp_server,
+                                                              auth, raw,
+                                                              state):
+    make_env(raw, auth.session, name="mcp-test-route")
+    state.calls.clear()
+    result = call(mcp_server, auth, "topology_change", {
+        "env_name": "mcp-test-route", "confirm": True,
+        "nodes": [{"nodeType": "cp", "nodeGroup": "cp", "count": 2,
+                   "fixedCloudlets": 2, "flexibleCloudlets": 6}]})
+    assert result["isError"] is False
+    assert result_payload(result)["scaled_groups"] == ["cp"]
+    # scaling existing groups rides applynodegroupdata, never editnodegroup
+    assert "environment/control/rest/applynodegroupdata" in state.calls
+    assert "environment/control/rest/changetopology" not in state.calls
+    info = result_payload(call(mcp_server, auth, "env_info",
+                               {"env_name": "mcp-test-route"}))
+    assert len(info["env"]["nodes"]) == 2
+
+    # adding a group rides changetopology (the verified add path)
+    state.calls.clear()
+    result = call(mcp_server, auth, "db_add", {
+        "env_name": "mcp-test-route", "engine": "postgres", "confirm": True})
+    assert result["isError"] is False
+    assert "environment/control/rest/changetopology" in state.calls
+    assert "environment/control/rest/applynodegroupdata" not in state.calls
+
+
 def test_env_create_wizard_mapping(mcp_server, auth):
     result = call(mcp_server, auth, "env_create", {
         "env_name": "mcp-test-create", "stack": "php:8.3",
@@ -282,8 +348,10 @@ def test_op_result_polling(mcp_server, auth, raw, state):
     session = auth.session
     # Fire-and-forget creation, then poll for running.
     raw.post("/1.0/environment/control/rest/createenvironment",
-             json={"session": session, "env": {"shortdomain": "mcp-test-op"},
-                   "nodes": [{"nodeType": "cp", "nodeGroup": "cp"}]})
+             data={"session": session,
+                   "env": json.dumps({"shortdomain": "mcp-test-op"}),
+                   "nodes": json.dumps([{"nodeType": "cp",
+                                         "nodeGroup": "cp"}])})
     result = call(mcp_server, auth, "op_result",
                   {"env_name": "mcp-test-op", "op": "status",
                    "target": ["running"], "timeout": 5})
@@ -302,7 +370,8 @@ def test_op_result_polling(mcp_server, auth, raw, state):
     assert payload["observed"]["statusName"] == "running"
 
     # Deletion verification: op=gone resolves once the env disappears.
-    state.deleteenv(session, "mcp-test-op", state.config.password)
+    state.deleteenv(session, "mcp-test-op", state.config.password,
+                    "mcp-test-op")  # typed confirmation: passphrase=envName
     result = call(mcp_server, auth, "op_result",
                   {"env_name": "mcp-test-op", "op": "gone", "timeout": 5})
     assert result_payload(result)["status"] == "done"
