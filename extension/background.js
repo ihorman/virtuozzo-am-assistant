@@ -1,4 +1,4 @@
-/* VAP Copilot — background service worker.
+/* Application Management Assistant — background service worker.
  *
  * Responsibilities (docs/PLAN.md §4):
  *   - settings (chrome.storage.sync) + session token (chrome.storage.local)

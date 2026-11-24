@@ -1,4 +1,4 @@
-# VAP Copilot — Extension <-> Agent API Contract (frozen v1.1)
+# Application Management Assistant — Extension <-> Agent API Contract (frozen v1.1)
 
 Version 1.1 — adds `progress` and `card` stream events (design-driven rich
 cards; see docs/DESIGN.md). All messages are JSON. The extension never talks to

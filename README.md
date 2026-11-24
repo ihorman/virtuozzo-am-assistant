@@ -1,4 +1,4 @@
-# virtuozzo-am-assistant (VAP Copilot)
+# virtuozzo-am-assistant (Application Management Assistant)
 
 End-user AI assistant for the Virtuozzo Application Manager (V/AM, formerly
 Jelastic / Virtuozzo Application Platform). It manages your cloud the way you

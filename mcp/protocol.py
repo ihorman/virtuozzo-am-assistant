@@ -1,4 +1,4 @@
-"""JSON-RPC 2.0 + MCP wire protocol helpers for the VAP Copilot MCP server.
+"""JSON-RPC 2.0 + MCP wire protocol helpers for the Application Management Assistant MCP server.
 
 Why not the PyPI ``mcp`` SDK: this repo's top-level package is itself named
 ``mcp`` (docs/PLAN.md section 8), which shadows the ``mcp`` SDK on

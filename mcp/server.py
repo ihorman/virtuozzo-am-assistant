@@ -1,4 +1,4 @@
-"""MCP server for VAP Copilot: Streamable HTTP (``/mcp``) + stdio.
+"""MCP server for Application Management Assistant: Streamable HTTP (``/mcp``) + stdio.
 
 Transport contract (docs/API-CONTRACT.md):
 

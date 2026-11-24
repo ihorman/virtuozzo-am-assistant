@@ -1,4 +1,4 @@
-/* Shared helpers for the VAP Copilot extension (background + sidepanel).
+/* Shared helpers for the Application Management Assistant extension (background + sidepanel).
  *
  * Plain classic script: loaded via importScripts() in the service worker and
  * via <script src> in the sidepanel. Everything hangs off the global

@@ -170,7 +170,7 @@ def _archive_file_name(url: str) -> str:
 
 
 class JelasticClient:
-    """Async client for the Jelastic REST subset used by VAP Copilot.
+    """Async client for the Jelastic REST subset used by Application Management Assistant.
 
     ``host`` is the platform base URL (e.g. ``https://app.example.com``);
     requests go to ``<host>/1.0/<service>/rest/<method>``. Pass ``transport``

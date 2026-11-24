@@ -1,5 +1,5 @@
 [Unit]
-Description=VAP Copilot assistant (agent + MCP, uvicorn)
+Description=Application Management Assistant assistant (agent + MCP, uvicorn)
 Documentation=https://github.com/ihorman/vap-copilot
 After=network-online.target
 Wants=network-online.target

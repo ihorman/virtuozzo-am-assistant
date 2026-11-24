@@ -298,7 +298,7 @@ async def _run_faster(conv: Conversation, message: str) -> None:
 
 async def _run_hello(conv: Conversation, message: str) -> None:
     await conv.emit("token", {
-        "text": "Hello! I'm your **VAP Copilot**. I can deploy apps, add databases, "
+        "text": "Hello! I'm your **Application Management Assistant**. I can deploy apps, add databases, "
                 "scale, troubleshoot and explain your bill.\n\n"
                 "Try one of the suggestions below, or just tell me what you need.\n\n"
                 "```\nDeploy my first app\n```"
@@ -330,7 +330,7 @@ def pick_scenario(message: str):
 # --------------------------------------------------------------------- #
 
 def create_mock_agent() -> FastAPI:
-    app = FastAPI(title="VAP Copilot mock agent", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Application Management Assistant mock agent", docs_url=None, redoc_url=None)
     conversations: dict[str, Conversation] = {}
 
     def get_conv(conversation_id) -> Optional[Conversation]:
@@ -423,7 +423,7 @@ def create_mock_agent() -> FastAPI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="VAP Copilot mock agent")
+    parser = argparse.ArgumentParser(description="Application Management Assistant mock agent")
     parser.add_argument("--port", type=int, default=8787)
     args = parser.parse_args()
     import uvicorn

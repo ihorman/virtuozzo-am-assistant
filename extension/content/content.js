@@ -1,4 +1,4 @@
-/* VAP Copilot — content script: FAB "AI Assistant" + env context capture.
+/* Application Management Assistant — content script: FAB "AI Assistant" + env context capture.
  *
  * Runs on any http(s) page but only renders on detected dashboard pages:
  *   - <meta name="vap-dashboard"> (mock dashboard / any host page opt-in)

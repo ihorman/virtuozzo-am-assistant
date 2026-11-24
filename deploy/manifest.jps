@@ -1,4 +1,4 @@
-# Virtuozzo AM Assistant (VAP Copilot) - OPTIONAL JPS package.
+# Virtuozzo AM Assistant (Application Management Assistant) - OPTIONAL JPS package.
 #
 # Installs the assistant as its OWN environment on the stand: one Docker node
 # running the image built from deploy/Dockerfile. Nothing in the existing
@@ -24,12 +24,12 @@ name: Virtuozzo AM Assistant
 version: 0.1.0
 description:
   text: AI assistant for the Virtuozzo Application Manager - chat, guided flows and an MCP tool endpoint. Runs as its own environment; the existing system stays untouched.
-  short: VAP Copilot assistant
+  short: Application Management Assistant
 
 nodes:
   - image: ${settings.image}
     nodeType: docker
-    displayName: VAP Copilot
+    displayName: Application Management Assistant
     nodeGroup: cp
     cloudlets: 8
     env:
@@ -79,7 +79,7 @@ settings:
       required: true
 
 success: |
-  ### VAP Copilot is up
+  ### Application Management Assistant is up
   - Health: [https://${env.domain}/healthz](https://${env.domain}/healthz)
   - MCP endpoint: `https://${env.domain}/mcp`
 

@@ -1,4 +1,4 @@
-"""MCP tool surface for VAP Copilot: specs, safety gates, execution.
+"""MCP tool surface for Application Management Assistant: specs, safety gates, execution.
 
 The tool list follows docs/PLAN.md section 2 (``envs_list`` .. ``op_result``).
 Every tool runs with the *caller's own* platform session (auth passthrough:

@@ -1,4 +1,4 @@
-/* VAP Copilot options page logic: settings + session fallback + diagnostics. */
+/* Application Management Assistant options page logic: settings + session fallback + diagnostics. */
 "use strict";
 
 (() => {

@@ -1,4 +1,4 @@
-"""CLI entry point: ``python -m mcp`` serves the VAP Copilot MCP server.
+"""CLI entry point: ``python -m mcp`` serves the Application Management Assistant MCP server.
 
 Modes:
   --stdio   newline-delimited JSON-RPC on stdin/stdout (default). Auth via
@@ -17,7 +17,7 @@ import sys
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m mcp",
-        description="VAP Copilot MCP server — Virtuozzo Application Manager "
+        description="Application Management Assistant MCP server — Virtuozzo Application Manager "
                     "(Jelastic/VAP) tools with session passthrough and "
                     "confirm-gated mutations.")
     mode = parser.add_mutually_exclusive_group()

@@ -15,7 +15,7 @@ import re
 from typing import Any, Optional, Tuple
 
 SYSTEM_PROMPT = """\
-You are VAP Copilot, a friendly expert assistant for the Virtuozzo Application \
+You are Application Management Assistant, a friendly expert assistant for the Virtuozzo Application \
 Manager (V/AM) hosting panel. You help users deploy applications, add databases, \
 scale environments, and troubleshoot problems — safely and step by step.
 
