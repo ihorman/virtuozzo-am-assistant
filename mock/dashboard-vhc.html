@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Loading...</title>
+  <!-- VHC/VAP-like dashboard fixture: NO vap-dashboard meta, NO jelastic
+       global, title "Loading..." — detection must fire on the platform's
+       own params script + window.App config (regression for the user bug:
+       extension showed 'auto-detect', panel background mismatched). -->
+  <script>
+    window.App = {
+      MODE: "c",
+      APP_API_URL: "https://app.vhc.virtuozzo.com/",
+      APP_PLATFORM_URL: "https://app.vhc.virtuozzo.com/",
+    };
+  </script>
+  <script src="global/GParams.js"></script>
+  <style>
+    :root {
+      --bg: #1F232B;
+      --panel: #2A2F38;
+      --text: #E6EDF7;
+      --muted: #8B9BB4;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: transparent;
+      color: var(--text);
+      font: 400 14px/1.5 Inter, system-ui, sans-serif;
+    }
+    /* wrapper-div background — the real-dashboard paint case */
+    #page-bg {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: -1;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 24px;
+      background: var(--panel);
+    }
+    .logo { font-weight: 700; letter-spacing: 0.02em; }
+    main { padding: 24px; }
+    h2 { font-size: 16px; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel);
+            border-radius: 10px; overflow: hidden; }
+    th, td { text-align: left; padding: 10px 14px; font-size: 13px; }
+    th { color: var(--muted); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="page-bg"></div>
+  <header>
+    <div class="logo">Virtuozzo</div>
+    <div class="muted">NEW ENVIRONMENT | IMPORT | MARKETPLACE</div>
+  </header>
+  <main>
+    <h2>Env Groups</h2>
+    <table>
+      <tr><th>Environment</th><th>Status</th></tr>
+      <tr><td>my-demo-env</td><td>Sleeping</td></tr>
+      <tr><td>env-6340644</td><td>Running</td></tr>
+    </table>
+  </main>
+</body>
+</html>

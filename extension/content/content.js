@@ -20,8 +20,19 @@
     if (document.querySelector('meta[name="vap-dashboard"]')) return true;
     if (document.querySelector("[data-jelastic], #jelastic-dashboard")) return true;
     if (typeof window.jelastic !== "undefined") return true;
-    const title = (document.title || "") + " " + (document.body && document.body.className || "");
-    if (/jelastic|virtuozzo application manager/i.test(title)) return true;
+    /* VHC / VAP family: the CMP SPA config and the dashboard's own params
+     * script (global/GParams.js) — the real stands expose these instead of
+     * any jelastic global (title is often just "Loading..."). */
+    if (window.App && (window.App.APP_API_URL || window.App.APP_PLATFORM_URL)) {
+      return true;
+    }
+    if (document.querySelector('script[src*="GParams.js"]')) return true;
+    const hay = (document.title || "") + " " +
+      (document.body && document.body.className || "") + " " +
+      (document.documentElement && document.documentElement.className || "");
+    if (/jelastic|virtuozzo application (manager|platform|management)|application manager/i.test(hay)) {
+      return true;
+    }
     return false;
   }
 
@@ -234,7 +245,15 @@
   async function boot() {
     const dashboard = isDashboard();
     const onPanelHost = await isPanelHost();
-    if (!dashboard && !onPanelHost) return;
+    if (!dashboard && !onPanelHost) {
+      /* SPAs (the VHC dashboard) may mount their markers after
+       * document_idle — retry once shortly after, then give up quietly. */
+      if (!boot._retried) {
+        boot._retried = true;
+        setTimeout(boot, 2000);
+      }
+      return;
+    }
 
     injectFab();
 

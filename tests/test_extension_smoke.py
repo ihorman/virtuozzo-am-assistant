@@ -446,6 +446,47 @@ def test_panel_background_matches_dashboard(browser, agent_server, static_server
 
 
 # --------------------------------------------------------------------- #
+# 4c. VHC-like dashboard detection (user bug: 'auto-detect' + bg mismatch) #
+# --------------------------------------------------------------------- #
+
+def test_vhc_like_dashboard_detection_and_context(browser, agent_server,
+                                                  static_server):
+    """Regression: a VHC-like dashboard (title 'Loading...', no jelastic
+    markers, wrapper-div background) must still be detected — so the panel
+    shows the platform host (not 'auto-detect') AND continues the exact
+    dashboard background."""
+    web = browser()
+    configure_agent(web, agent_server)
+    page = web.ctx.new_page()
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.goto(static_server + "/dashboard-vhc.html")
+
+    fab = page.locator("#vap-fab")
+    fab.wait_for(state="visible")
+
+    page_bg = page.evaluate(
+        "() => getComputedStyle(document.getElementById('page-bg')).backgroundColor")
+
+    panel = open_sidepanel(web)
+    panel.wait_for_selector(".hero")
+
+    # the context bar shows the platform host, never the 'auto-detect' fallback
+    wait_until(
+        lambda: panel.locator("#host-label").inner_text() != "auto-detect",
+        message="context bar shows the platform host")
+    assert "127.0.0.1" in panel.locator("#host-label").inner_text()
+
+    # the panel continues the dashboard background seamlessly
+    wait_until(
+        lambda: panel.evaluate(
+            "() => getComputedStyle(document.body).backgroundColor") == page_bg,
+        message=f"panel background == dashboard background ({page_bg})")
+
+    panel.close()
+    page.close()
+
+
+# --------------------------------------------------------------------- #
 # 5. light theme screenshots (DESIGN.md verification bar)               #
 # --------------------------------------------------------------------- #
 
