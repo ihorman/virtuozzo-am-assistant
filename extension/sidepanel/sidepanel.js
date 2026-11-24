@@ -66,7 +66,23 @@
     });
   }
 
+  /** Continue the dashboard's background seamlessly (DESIGN.md): the panel
+   *  adopts the sampled page background and flips its tokens for light pages. */
+  function applyTheme(theme) {
+    if (!theme) return;
+    try {
+      if (theme.color) document.body.style.backgroundColor = theme.color;
+      /* Drop our decorative gradient when the page provides its own image;
+       * otherwise keep the sampled flat color exactly as-is. */
+      document.body.style.backgroundImage = theme.image || "none";
+      document.body.classList.toggle("light", Boolean(theme.light));
+    } catch (_err) {
+      /* keep design-system defaults */
+    }
+  }
+
   function applyContext(context) {
+    if (context.theme) applyTheme(context.theme);
     if (context.envName) {
       el.envPill.hidden = false;
       el.envName.textContent = context.envName;

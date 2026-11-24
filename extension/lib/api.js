@@ -12,8 +12,9 @@ var VapApi = (() => {
   const DEFAULT_SETTINGS = {
     /* Hosted default agent endpoint (PLAN §7). */
     agentUrl: "https://office.bannoe.it/am-assistant",
-    /* Empty = auto: the FAB appears on any detected dashboard page. */
-    panelHost: "",
+    /* The demo/VHC panel host, baked so first run is zero-config.
+     * Clear the field in Options to re-enable auto-detection. */
+    panelHost: "https://app.vhc.virtuozzo.com",
   };
 
   /* ------------------------------------------------------------------

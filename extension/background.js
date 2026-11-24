@@ -172,7 +172,11 @@ async function authHeaders(settings, extra = {}) {
   if (settings.panelHost) headers["X-Jelastic-Host"] = settings.panelHost;
   if (token) headers["X-Jelastic-Session"] = token;
   const { lastContext } = await chrome.storage.local.get("lastContext");
-  if (lastContext) headers["X-Vap-Context"] = JSON.stringify(lastContext);
+  if (lastContext) {
+    /* theme is display-only — keep the wire contract {envName, page, url}. */
+    const { theme, ...ctx } = lastContext;
+    headers["X-Vap-Context"] = JSON.stringify(ctx);
+  }
   return headers;
 }
 

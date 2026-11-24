@@ -40,6 +40,38 @@
 
   /* ---------------- context capture ---------------- */
 
+  /** Sample the dashboard's rendered background so the side panel can
+   *  continue it seamlessly (DESIGN.md: the panel must not differ from the
+   *  dashboard background). Returns {color, image, light}. */
+  function sampleTheme() {
+    try {
+      const bodyStyle = getComputedStyle(document.body);
+      const htmlStyle = getComputedStyle(document.documentElement);
+      let color = bodyStyle.backgroundColor;
+      if (!color || /rgba\(0, 0, 0, 0\)|transparent/.test(color)) {
+        color = htmlStyle.backgroundColor;
+      }
+      const image =
+        bodyStyle.backgroundImage && bodyStyle.backgroundImage !== "none"
+          ? bodyStyle.backgroundImage
+          : htmlStyle.backgroundImage && htmlStyle.backgroundImage !== "none"
+            ? htmlStyle.backgroundImage
+            : null;
+      const m = String(color).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      let light = false;
+      if (m) {
+        const chan = [Number(m[1]), Number(m[2]), Number(m[3])].map((v) => {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        });
+        light = 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2] > 0.4;
+      }
+      return { color: color || null, image, light };
+    } catch (_err) {
+      return null;
+    }
+  }
+
   function captureContext() {
     const url = new URL(location.href);
     let envName =
@@ -57,7 +89,7 @@
     if (/marketplace/i.test(location.href)) page = "marketplace";
     else if (envName) page = "env";
 
-    return { envName, page, url: location.href };
+    return { envName, page, url: location.href, theme: sampleTheme() };
   }
 
   function scanPageToken() {

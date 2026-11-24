@@ -31,6 +31,16 @@
   }
 }
 
+/* Page-sampled theme (content script): flip tokens when the dashboard page
+ * is light, so the panel blends with the dashboard instead of the browser. */
+body.light {
+  --surface: rgba(11, 18, 32, 0.04);
+  --surface-2: rgba(11, 18, 32, 0.08);
+  --border: rgba(11, 18, 32, 0.10);
+  --text: #16233A;
+  --muted: #4C5D76;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
