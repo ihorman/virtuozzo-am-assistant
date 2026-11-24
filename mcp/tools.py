@@ -124,7 +124,34 @@ def _cloudlet_split(total: int) -> dict:
 
 def _stack_node(stack: str, node_group: str,
                 cloudlets: Optional[int]) -> dict:
-    """'php:8.3' -> node spec with nodeType 'php', displayName 'php:8.3'."""
+    """'php:8.3' -> nodeType 'php'; 'docker:nginx:alpine' -> docker node.
+
+    Docker form: ``docker:<image>[:<tag>]`` builds the ``nodeType: docker``
+    shape with ``customitem`` dockerName/dockerTag - the docker-centric
+    platforms (VHC) require this (verified live).
+    """
+    stack = stack.strip()
+    if not stack:
+        raise ToolInputError("empty stack/db spec")
+    if stack.startswith("docker:"):
+        rest = stack[len("docker:"):].strip()
+        if ":" in rest:
+            image, tag = rest.rsplit(":", 1)
+        else:
+            image, tag = rest, "latest"
+        image, tag = image.strip(), tag.strip()
+        if (not image or not tag or any(c.isspace() for c in image + tag)
+                or "/" == image[:1]):
+            raise ToolInputError(f"invalid docker spec [{stack}]")
+        spec = {"nodeType": "docker", "nodeGroup": node_group,
+                "displayName": f"{image}:{tag}", "count": 1,
+                # Write shape is 'metadata' (verified live: createenvironment
+                # rejects 'customitem', demanding "metadata.dockerName or
+                # image"); customitem is only the read shape.
+                "metadata": {"dockerName": image, "dockerTag": tag}}
+        if cloudlets is not None:
+            spec.update(_cloudlet_split(cloudlets))
+        return spec
     base = stack.split(":", 1)[0].strip()
     if not base:
         raise ToolInputError(f"invalid stack/db spec [{stack}]")
@@ -225,7 +252,38 @@ async def _h_env_info(client: JelasticClient, args: dict) -> dict:
 
 async def _h_env_stats(client: JelasticClient, args: dict) -> dict:
     env_name = _req_str(args, "env_name")
-    return {"env_name": env_name, "nodes": await client.env_stats(env_name)}
+    rows = await client.env_stats(env_name)
+    return {"env_name": env_name,
+            "nodes": [_stat_row(row) for row in rows]}
+
+
+def _stat_row(row: dict) -> dict:
+    """Normalize a getsumstat row to the tool contract.
+
+    Live rows carry lowercase ``nodeid`` (string) and ``mem``/``memTotal``
+    (KB) instead of the id/ram fields consumers expect - bridge the names
+    here so every stand yields the same shape.
+    """
+    row = dict(row)
+    node_id = row.get("id", row.get("nodeId"))
+    if node_id is None and row.get("nodeid") is not None:
+        try:
+            node_id = int(row["nodeid"])
+        except (TypeError, ValueError):
+            node_id = row["nodeid"]
+    if node_id is not None:
+        row.setdefault("id", node_id)
+        row.setdefault("nodeId", node_id)
+    if "ram" not in row:
+        mem, total = row.get("mem"), row.get("memTotal")
+        if total:
+            try:
+                row["ram"] = round(float(mem or 0) / float(total) * 100, 1)
+            except (TypeError, ValueError):
+                pass
+        elif mem is not None:
+            row["ram"] = mem
+    return row
 
 
 async def _h_env_create(client: JelasticClient, args: dict) -> dict:
@@ -238,7 +296,7 @@ async def _h_env_create(client: JelasticClient, args: dict) -> dict:
         nodes.append(_stack_node(db, "db", cloudlets))
     result = await client.create_env(
         env_name, nodes=nodes, engine=stack,
-        region=_opt_str(args, "region") or "default",
+        region=_opt_str(args, "region"),
         display_name=_opt_str(args, "display_name"))
     result["detail"] = ("environment creation accepted (asynchronous); poll "
                         "with op_result(env_name, op='status') or env_info")
@@ -274,14 +332,67 @@ async def _h_node_scale(client: JelasticClient, args: dict) -> dict:
         _req_int(args, "fixed_cloudlets"), _req_int(args, "flexible_cloudlets"))
 
 
+def _group_specs(nodes: list) -> dict:
+    """Collapse a node list to per-group {count, fixed, flexible} specs."""
+    groups: dict = {}
+    for node in nodes:
+        group = str(node.get("nodeGroup") or node.get("nodeType") or "cp")
+        entry = groups.setdefault(group, {"count": 0,
+                                          "fixedCloudlets":
+                                              node.get("fixedCloudlets"),
+                                          "flexibleCloudlets":
+                                              node.get("flexibleCloudlets")})
+        entry["count"] += 1
+    return groups
+
+
 async def _h_topology_change(client: JelasticClient, args: dict) -> dict:
+    """Route by what actually changes (verified live shapes):
+
+    - scaling EXISTING groups -> ``applynodegroupdata`` per group
+      (``editnodegroup`` answers 1102 for adds);
+    - adding/removing groups -> ``changetopology`` with the full node list
+      (the verified add path; the ``env`` descriptor is added by the client).
+    """
     env_name = _req_str(args, "env_name")
     nodes = args.get("nodes")
     if not isinstance(nodes, list) or not nodes or \
             not all(isinstance(n, dict) for n in nodes):
         raise ToolInputError("argument [nodes] must be a non-empty array of "
                              "node specs")
-    return await client.change_topology(env_name, nodes)
+    requested = {}
+    for spec in nodes:
+        group = str(spec.get("nodeGroup") or spec.get("nodeType") or "cp")
+        requested[group] = spec
+    info = await client.env_info(env_name)
+    current = _group_specs(info.get("nodes") or [])
+    if requested and set(requested) == set(current):
+        changed = {}
+        for group, spec in requested.items():
+            want_count = spec.get("count")
+            changes = {}
+            if want_count is not None and int(want_count) != \
+                    current[group]["count"]:
+                changes["count"] = int(want_count)
+            for key in ("fixedCloudlets", "flexibleCloudlets"):
+                if spec.get(key) is not None and int(spec[key]) != \
+                        current[group].get(key):
+                    changes[key] = int(spec[key])
+            if changes:
+                changed[group] = await client.apply_node_group_data(
+                    env_name, group,
+                    count=changes.get("count"),
+                    fixed_cloudlets=changes.get("fixedCloudlets"),
+                    flexible_cloudlets=changes.get("flexibleCloudlets"))
+        return {"env_name": env_name, "scaled_groups": sorted(changed),
+                "detail": ("node group scaling applied via applynodegroupdata "
+                           "(asynchronous); poll with op_result(env_name, "
+                           "op='nodes_ready')") if changed else
+                          "topology already matches the request"}
+    result = await client.change_topology(env_name, nodes)
+    result["detail"] = ("topology change accepted (asynchronous); poll with "
+                        "op_result(env_name, op='nodes_ready')")
+    return result
 
 
 async def _h_deploy_archive(client: JelasticClient, args: dict) -> dict:
@@ -295,13 +406,6 @@ async def _h_deploy_archive(client: JelasticClient, args: dict) -> dict:
     return await client.deploy_archive(
         env_name, context=_opt_str(args, "context") or "ROOT",
         url=url, archive=archive, node_group=_opt_str(args, "node_group"))
-
-
-def _frame_platform_text(value: Any) -> Any:
-    """Frame platform-returned text fields as untrusted data (T4)."""
-    if isinstance(value, str):
-        return security.frame_untrusted(value)
-    return value
 
 
 async def _h_deploy_jps(client: JelasticClient, args: dict) -> dict:
@@ -354,33 +458,66 @@ async def _h_db_add(client: JelasticClient, args: dict) -> dict:
     return result
 
 
+def _frame_platform_text(value: Any) -> Any:
+    """Frame platform-returned text fields as untrusted data (T4)."""
+    if isinstance(value, str):
+        return security.frame_untrusted(value)
+    return value
+
+
+def _frame_logs_value(value: Any, key: str = "") -> Any:
+    """Recursively frame prose fields of platform log payloads (T4)."""
+    if isinstance(value, dict):
+        return {k: _frame_logs_value(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_frame_logs_value(v, key) for v in value]
+    if isinstance(value, str) and key in ("message", "text", "body"):
+        return _frame_platform_text(value)
+    return value
+
+
 async def _h_logs_read(client: JelasticClient, args: dict) -> dict:
+    """Three live shapes behind one tool: the log-file listing (``getlogs``),
+    one file's content (``readlog`` -> ``{linescount, body}``), or the log
+    directory tree (``getlogslist``). All are per-node; ``node_id`` defaults
+    to the environment's master node."""
     env_name = _req_str(args, "env_name")
-    logs = await client.get_logs(env_name, limit=_opt_int(args, "limit"))
-    framed = []
-    for entry in logs:
-        if isinstance(entry, dict):
-            framed.append({
-                k: _frame_platform_text(v) if k in ("message", "text") else v
-                for k, v in entry.items()})
-        else:
-            framed.append(_frame_platform_text(entry))
-    return {"env_name": env_name, "logs": framed, "count": len(framed)}
+    node_id = _opt_int(args, "node_id")
+    path = _opt_str(args, "path")
+    if args.get("list_dirs") is True:
+        entries = await client.get_logs_list(env_name, node_id=node_id)
+        return {"env_name": env_name, "dirs": _frame_logs_value(entries),
+                "count": len(entries)}
+    if path:
+        result = await client.read_log(
+            env_name, path, node_id=node_id, line=_opt_int(args, "line"))
+        return {"env_name": env_name,
+                "path": result["path"],
+                "linescount": result["linescount"],
+                "body": _frame_logs_value(result.get("body", ""), "body")}
+    logs = await client.get_logs(env_name, node_id=node_id,
+                                 limit=_opt_int(args, "limit"))
+    return {"env_name": env_name, "logs": _frame_logs_value(logs),
+            "count": len(logs)}
 
 
 async def _h_env_var_get(client: JelasticClient, args: dict) -> dict:
     env_name = _req_str(args, "env_name")
-    return {"env_name": env_name,
-            "vars": await client.get_env_variables(env_name)}
+    node_group = _opt_str(args, "node_group") or "cp"
+    return {"env_name": env_name, "node_group": node_group,
+            "vars": await client.get_env_variables(env_name,
+                                                   node_group=node_group)}
 
 
 async def _h_env_var_set(client: JelasticClient, args: dict) -> dict:
     env_name = _req_str(args, "env_name")
+    node_group = _opt_str(args, "node_group") or "cp"
     variables = args.get("vars")
     if not isinstance(variables, dict) or not variables:
         raise ToolInputError("argument [vars] must be a non-empty object")
-    return {"env_name": env_name,
-            "vars": await client.set_env_variables(env_name, variables)}
+    return {"env_name": env_name, "node_group": node_group,
+            "vars": await client.set_env_variables(env_name, variables,
+                                                   node_group=node_group)}
 
 
 async def _h_ssl_letsencrypt(client: JelasticClient, args: dict) -> dict:
@@ -460,8 +597,10 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         _schema({
             "env_name": _ENV_NAME,
             "stack": {**STACK,
-                      "description": "App stack, e.g. 'php:8.3', 'java:21', "
-                                     "'nodejs:20'. Default 'php:8.3'."},
+                      "description": "App stack: 'php:8.3', 'java:21', "
+                                     "'nodejs:20', or 'docker:<image>[:<tag>]' "
+                                     "(docker-centric platforms), e.g. "
+                                     "'docker:nginx:alpine'. Default 'php:8.3'."},
             "db": {**STACK,
                    "description": "Optional database node, e.g. 'mysql:8.0', "
                                   "'postgres:16', 'redis:7.2'."},
@@ -576,19 +715,44 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
                           "the database node. Default 8."},
         }, ("env_name", "engine"), mutating=True), _h_db_add),
     ToolSpec(
-        "logs_read", "Read the recent event/operation log of an environment.",
+        "logs_read",
+        "Read a node's logs: the log-file listing (default), one file's "
+        "content (path=...), or the log directory tree (list_dirs=true). "
+        "node_id defaults to the environment's master node.",
         _schema({"env_name": _ENV_NAME,
+                 "node_id": {"type": "integer", "minimum": 1,
+                             "maximum": 10000000, "description": "Node id "
+                             "from env_info (default: master node)."},
+                 "path": {"type": "string", "maxLength": 256,
+                          "pattern": r"^/[A-Za-z0-9._/+-]+$",
+                          "description": "Log file path from the listing, "
+                                         "e.g. '/var/log/cron' — reads its "
+                                         "content (readlog)."},
+                 "line": {"type": "integer", "minimum": 1, "maximum": 5000,
+                          "description": "How many lines to read from the "
+                                         "file head (default: whole file)."},
+                 "list_dirs": {"type": "boolean",
+                               "description": "Return the log directory "
+                                              "tree (getlogslist) instead "
+                                              "of the file listing."},
                  "limit": {"type": "integer", "minimum": 1, "maximum": 500,
-                           "description": "Max entries "
-                           "(most recent)."}}, ("env_name",),
-                mutating=False), _h_logs_read),
+                           "description": "Max listing entries."}},
+                ("env_name",), mutating=False), _h_logs_read),
     ToolSpec(
-        "env_var_get", "Read an environment's variables.",
-        _schema({"env_name": _ENV_NAME}, ("env_name",), mutating=False),
-        _h_env_var_get),
-    ToolSpec(
-        "env_var_set", "Replace an environment's variables. " + _CONFIRM_NOTE,
+        "env_var_get", "Read a node group's container environment variables.",
         _schema({"env_name": _ENV_NAME,
+                 "node_group": {**NODE_GROUP,
+                                "description": "Node group to read "
+                                               "(default 'cp')."}},
+                ("env_name",), mutating=False), _h_env_var_get),
+    ToolSpec(
+        "env_var_set",
+        "Replace a node group's container environment variables. "
+        + _CONFIRM_NOTE,
+        _schema({"env_name": _ENV_NAME,
+                 "node_group": {**NODE_GROUP,
+                                "description": "Node group to write "
+                                               "(default 'cp')."},
                  "vars": {"type": "object", "maxProperties": 100,
                           "keyPattern": r"^[A-Za-z_][A-Za-z0-9_]{0,63}$",
                           "valueMaxLength": 4096,

@@ -3,9 +3,10 @@
 Design rules (from docs/PLAN.md):
 
 - **Session passthrough**: every request carries the caller's ``session``
-  token (query/form/JSON, exactly like the real API). The client never stores
-  passwords; :meth:`JelasticClient.delete_env` forwards the account password
-  once to ``deleteenv`` and keeps nothing.
+  token (query/form, exactly like the real API). The client never stores
+  passwords; :meth:`JelasticClient.delete_env` forwards the typed
+  confirmation ``passphrase=<envName>`` (required on VHC 8.15.1) and the
+  account password once to ``deleteenv`` and keeps nothing.
 - **Result-code mapping**: the platform answers HTTP 200 with
   ``{"result": <code>, ...}``; non-zero codes are raised as typed exceptions
   (:data:`RESULT_CODE_MAP`).
@@ -21,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -69,7 +72,7 @@ class ManifestError(JelasticError):
 
 
 class EnvironmentNotFoundError(JelasticError):
-    """Environment does not exist (mock code 2024 / text-mapped on real stands)."""
+    """Environment does not exist (live VHC result 11; legacy stands 2024)."""
 
 
 class NodeNotFoundError(JelasticError):
@@ -77,7 +80,7 @@ class NodeNotFoundError(JelasticError):
 
 
 class InvalidParameterError(JelasticError):
-    """Missing or invalid parameter (mock code 2026 / real 'invalid parameter')."""
+    """Missing or invalid parameter (live result 3 / 'invalid parameter')."""
 
 
 class MalformedResponseError(JelasticError):
@@ -108,12 +111,20 @@ class OperationTimeout(Exception):
 
 
 #: result code -> exception class (codes not listed raise :class:`JelasticError`)
+#:
+#: Codes verified live on VHC 8.15.1: 0 ok, 3 invalid parameter, 11 not found
+#: (ghost env), 705 no rights, 724 "Confirmation failed" (deleteenv without
+#: passphrase), 1102, 2002, 2314 domain taken, 2391, 4099 deploy failed.
 RESULT_CODE_MAP: dict[int, type] = {
+    3: InvalidParameterError,
     9: SessionExpiredError,
+    11: EnvironmentNotFoundError,
     501: SessionExpiredError,
     701: AuthFailedError,
+    724: InvalidParameterError,
     2212: DeleteInProgressError,
     2314: DomainUnavailableError,
+    4099: OperationFailedError,
     4109: OperationFailedError,
     4132: JpsTimeoutError,
     11001: ManifestError,
@@ -122,7 +133,40 @@ RESULT_CODE_MAP: dict[int, type] = {
     2026: InvalidParameterError,
 }
 
+#: Numeric env ``status`` -> status name (the classic stable-state catalog).
+#: Verified live on VHC 8.15.1: ``status: 1`` = running, and there is NO
+#: ``statusName`` field at all - so the client synthesizes one. Any code
+#: outside this map becomes ``status_<n>``: it can never match a wait target,
+#: which is exactly "treat unknown values as not running".
+STATUS_BY_CODE: dict[int, str] = {0: "stopped", 1: "running", 2: "sleep"}
+
+
+def _normalize_env(env: dict) -> dict:
+    """Return a copy of an env object with a usable ``statusName`` present."""
+    env = dict(env)
+    if not env.get("statusName"):
+        status = env.get("status")
+        if isinstance(status, bool) or not isinstance(status, int):
+            env["statusName"] = None
+        else:
+            env["statusName"] = STATUS_BY_CODE.get(status, f"status_{status}")
+    return env
+
 # --- client ----------------------------------------------------------------
+
+_ARCHIVE_SUFFIXES = (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z",
+                     ".war", ".jar", ".ear")
+
+
+def _archive_file_name(url: str) -> str:
+    """Derive a safe ``fileName`` for a deploy URL (the live API wants one)."""
+    name = urlparse(url).path.rsplit("/", 1)[-1]
+    name = re.sub(r"[^A-Za-z0-9._-]", "", name)
+    if not name:
+        name = "archive.zip"
+    if not name.lower().endswith(_ARCHIVE_SUFFIXES):
+        name += ".zip"
+    return name
 
 
 class JelasticClient:
@@ -177,11 +221,34 @@ class JelasticClient:
         if code is None:
             raise MalformedResponseError(
                 None, "response has no 'result' field", body)
-        if code == 0:
-            return body
-        message = body.get("error") or body.get("errorText") or "platform error"
-        exc_cls = RESULT_CODE_MAP.get(code, JelasticError)
-        raise exc_cls(code, message, body)
+        if code != 0:
+            message = body.get("error") or body.get("errorText") or "platform error"
+            exc_cls = RESULT_CODE_MAP.get(code, JelasticError)
+            raise exc_cls(code, message, body)
+        # VHC/hx-core nests operation errors under 'response' chains even when
+        # the outer result is 0 (verified live: {result:0, response:{result:3,
+        # error:...}}). Walk the chain and fail on the first nested error.
+        node: Any = body
+        for _ in range(5):
+            if isinstance(node, dict):
+                node = node.get("response")
+            elif isinstance(node, list):
+                nested = next((n for n in node if isinstance(n, dict)
+                               and n.get("result") not in (None, 0)), None)
+                node = nested if nested is not None else None
+            else:
+                node = None
+            if isinstance(node, dict) and node.get("result") not in (None, 0):
+                ncode = node.get("result")
+                message = (node.get("error") or node.get("errorText")
+                           or "platform error")
+                exc_cls = RESULT_CODE_MAP.get(ncode, JelasticError)
+                if "invalid parameter" in str(message).lower():
+                    exc_cls = InvalidParameterError
+                raise exc_cls(ncode, message, node)
+            if node is None:
+                break
+        return body
 
     async def _request(self, path: str, params: Optional[dict] = None, *,
                        json_body: Optional[dict] = None) -> dict:
@@ -192,10 +259,17 @@ class JelasticClient:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         try:
             if json_body is not None:
-                body = dict(json_body)
+                # VHC/hx-core reads POST parameters from the form channel only
+                # (verified live: a JSON body yields "invalid parameter
+                # [session]"). Nested values (env, nodes, vars) travel as JSON
+                # strings inside form fields - the classic Jelastic shape.
+                form = {k: v for k, v in dict(json_body).items()
+                        if v is not None}
                 if self.session is not None:
-                    body.setdefault("session", self.session)
-                response = await self._http.post(path, json=body)
+                    form.setdefault("session", self.session)
+                data = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+                        for k, v in form.items()}
+                response = await self._http.post(path, data=data)
             else:
                 if self.session is not None:
                     params.setdefault("session", self.session)
@@ -250,28 +324,129 @@ class JelasticClient:
     # -- read tools ---------------------------------------------------------
 
     async def list_envs(self) -> list:
+        """All environments as plain env dicts (status normalized).
+
+        Classic Jelastic nests each env under ``infos[].env``; VHC 8.15.1
+        returns flat summaries - both are unwrapped to the same shape.
+        """
         body = await self._request("environment/control/rest/getenvs")
-        return body.get("infos", [])
+        envs = []
+        for entry in body.get("infos", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("env")
+            envs.append(_normalize_env(nested if isinstance(nested, dict)
+                                       else entry))
+        return envs
 
     async def env_info(self, env_name: str) -> dict:
+        """Full environment info as one dict: the env object with ``nodes``
+        and ``nodeGroups`` attached (``statusName`` normalized).
+
+        Accepts every shape in the family: VHC 8.15.1 returns the objects
+        FLAT at the top level, classic Jelastic nests them under ``info``,
+        and some stands embed ``nodes`` inside the env object itself.
+        """
         body = await self._request("environment/control/rest/getenvinfo",
                                    params={"envName": env_name})
-        return body["env"]
+        nested = body.get("info")
+        info: dict = nested if isinstance(nested, dict) else body
+        env_obj = info.get("env")
+        if isinstance(env_obj, dict):
+            env: dict = env_obj
+        else:
+            env = {k: v for k, v in info.items()
+                   if k not in ("result", "nodes", "nodeGroups")}
+        nodes = info.get("nodes") or env.get("nodes") or []
+        node_groups = info.get("nodeGroups") or env.get("nodeGroups") or []
+        merged = {k: v for k, v in env.items()
+                  if k not in ("nodes", "nodeGroups")}
+        merged["nodes"] = list(nodes)
+        merged["nodeGroups"] = list(node_groups)
+        return _normalize_env(merged)
 
     async def env_stats(self, env_name: str) -> list:
-        body = await self._request("environment/control/rest/getenvstat",
-                                   params={"envName": env_name})
-        return body.get("nodes", [])
+        """Per-node resource stats (``getsumstat`` - ``getenvstat`` 404s live).
 
-    async def get_logs(self, env_name: str, *, limit: Optional[int] = None) -> list:
-        body = await self._request("environment/control/rest/getlogs",
-                                   params={"envName": env_name, "limit": limit})
-        return body.get("logs", [])
-
-    async def get_env_variables(self, env_name: str) -> dict:
-        body = await self._request("environment/control/rest/getenvvariables",
+        The live envelope carries one entry per node plus an aggregate row
+        with ``nodeid == "sum"``; the aggregate is not a node and is dropped.
+        """
+        body = await self._request("environment/control/rest/getsumstat",
                                    params={"envName": env_name})
-        return body.get("vars", {})
+        stats = body.get("stats") or body.get("nodes") or []
+        return [s for s in stats
+                if str(s.get("nodeid", s.get("nodeId", ""))) != "sum"]
+
+    async def _resolve_node_id(self, env_name: str,
+                               node_id: Optional[int]) -> int:
+        """Log APIs require a ``nodeId`` live; default to the master node."""
+        if node_id is not None:
+            return node_id
+        info = await self.env_info(env_name)
+        nodes = info.get("nodes") or []
+        node = next((n for n in nodes if n.get("ismaster")), None) \
+            or (nodes[0] if nodes else None)
+        if node is None or node.get("id") is None:
+            raise NodeNotFoundError(
+                None, f"environment [{env_name}] has no nodes to read logs "
+                      f"from", {"envName": env_name})
+        return node["id"]
+
+    async def get_logs(self, env_name: str, *, node_id: Optional[int] = None,
+                       limit: Optional[int] = None) -> list:
+        """Log-file listing for a node (``getlogs``; requires ``nodeId`` live).
+
+        Returns the keyword/file groups (``keywords`` on VHC 8.15.1). The
+        content of one file comes from :meth:`read_log`.
+        """
+        body = await self._request(
+            "environment/control/rest/getlogs",
+            params={"envName": env_name,
+                    "nodeId": await self._resolve_node_id(env_name, node_id)})
+        groups = body.get("keywords") or body.get("logs") or []
+        if limit is not None:
+            groups = groups[:max(0, int(limit))]
+        return groups
+
+    async def read_log(self, env_name: str, path: str, *,
+                       node_id: Optional[int] = None,
+                       line: Optional[int] = None) -> dict:
+        """Read the head of one log file (``readlog``).
+
+        Live shape: ``path=/var/log/...&line=N`` -> ``{linescount, body}``.
+        """
+        body = await self._request(
+            "environment/control/rest/readlog",
+            params={"envName": env_name,
+                    "nodeId": await self._resolve_node_id(env_name, node_id),
+                    "path": path, "line": line})
+        return {"path": path, "linescount": body.get("linescount"),
+                "body": body.get("body", "")}
+
+    async def get_logs_list(self, env_name: str, *,
+                            node_id: Optional[int] = None) -> list:
+        """Log directories and file groups for a node (``getlogslist``)."""
+        body = await self._request(
+            "environment/control/rest/getlogslist",
+            params={"envName": env_name,
+                    "nodeId": await self._resolve_node_id(env_name, node_id)})
+        return body.get("array") or []
+
+    async def get_env_variables(self, env_name: str, *,
+                                node_group: str = "cp",
+                                node_id: Optional[int] = None) -> dict:
+        """Container env vars: ``getcontainerenvvars`` by node id, or
+        ``getcontainerenvvarsbygroup`` by node group (live: ``{"object":
+        {...}}``). ``getenvvariables`` does not exist on VHC 8.15.1."""
+        if node_id is not None:
+            body = await self._request(
+                "environment/control/rest/getcontainerenvvars",
+                params={"envName": env_name, "nodeId": node_id})
+        else:
+            body = await self._request(
+                "environment/control/rest/getcontainerenvvarsbygroup",
+                params={"envName": env_name, "nodeGroup": node_group})
+        return body.get("object") or body.get("vars") or {}
 
     # -- catalogs / quotas / SSL (deploy wizard awareness) -------------------
 
@@ -302,9 +477,14 @@ class JelasticClient:
     # -- mutating tools (fire-and-forget: return on acknowledgement) --------
 
     async def create_env(self, env_name: str, *, nodes: Optional[list] = None,
-                         engine: Optional[str] = None, region: str = "default",
+                         engine: Optional[str] = None,
+                         region: Optional[str] = None,
                          display_name: Optional[str] = None) -> dict:
-        env = {"shortdomain": env_name, "region": region}
+        env = {"shortdomain": env_name}
+        # Region names are platform-specific (verified live: VHC rejects
+        # "default"); only send one when the caller explicitly has a region.
+        if region is not None:
+            env["region"] = region
         if engine is not None:
             env["engine"] = engine
         if display_name is not None:
@@ -327,16 +507,22 @@ class JelasticClient:
         return await self._request("environment/control/rest/sleepenv",
                                    params={"envName": env_name})
 
-    async def delete_env(self, env_name: str, password: str, *,
-                         wait: bool = True, timeout: float = 120.0) -> dict:
-        """Delete an environment. The account password is forwarded once and
-        never stored. A ``2212`` (deletion already in progress) is tolerated:
-        it means the environment is on its way out, which is the goal. With
-        ``wait=True`` the call returns only once the environment is gone."""
+    async def delete_env(self, env_name: str, password: Optional[str] = None,
+                         *, wait: bool = True, timeout: float = 120.0) -> dict:
+        """Delete an environment (POST ``deleteenv``).
+
+        VHC 8.15.1 requires the typed confirmation ``passphrase=<envName>``
+        (result 724 "Confirmation failed" without it); the account password is
+        sent along when the caller has one. Neither is stored. A ``2212``
+        (deletion already in progress) is tolerated: it means the environment
+        is on its way out, which is the goal. With ``wait=True`` the call
+        returns only once the environment is gone."""
+        form: dict = {"envName": env_name, "passphrase": env_name}
+        if password:
+            form["password"] = password
         try:
             body = await self._request(
-                "environment/control/rest/deleteenv",
-                params={"envName": env_name, "password": password})
+                "environment/control/rest/deleteenv", json_body=form)
         except DeleteInProgressError:
             body = {"result": 0, "envName": env_name, "statusName": "deleting",
                     "alreadyInProgress": True}
@@ -348,23 +534,66 @@ class JelasticClient:
                          fixed_cloudlets: int, flexible_cloudlets: int) -> dict:
         return await self._request(
             "environment/control/rest/setcloudletscountbyid",
-            params={"envName": env_name, "nodeId": node_id,
-                    "fixedCloudlets": fixed_cloudlets,
-                    "flexibleCloudlets": flexible_cloudlets})
+            json_body={"envName": env_name, "nodeId": node_id,
+                       "fixedCloudlets": fixed_cloudlets,
+                       "flexibleCloudlets": flexible_cloudlets})
 
-    async def change_topology(self, env_name: str, nodes: list) -> dict:
+    async def change_topology(self, env_name: str, nodes: list, *,
+                              region: str = "", sslstate: bool = False) -> dict:
+        """Change the topology (add/remove node groups, resize).
+
+        Verified live shape: form-encoded POST with the ``env`` descriptor
+        ``{"region": "", "sslstate": false}`` + the ``nodes`` specs as a JSON
+        string; a bare ``envName`` yields "invalid parameter [env]".
+        """
         return await self._request(
             "environment/control/rest/changetopology",
-            json_body={"envName": env_name, "nodes": nodes})
+            json_body={"envName": env_name,
+                       "env": {"region": region, "sslstate": sslstate},
+                       "nodes": nodes})
+
+    async def apply_node_group_data(self, env_name: str, node_group: str,
+                                    *, count: Optional[int] = None,
+                                    fixed_cloudlets: Optional[int] = None,
+                                    flexible_cloudlets: Optional[int] = None
+                                    ) -> dict:
+        """Scale an EXISTING node group (verified live shape: ``nodeGroup`` +
+        form ``data={"count","fixedCloudlets","flexibleCloudlets"}``).
+
+        Adding nodes is not this method's job (``editnodegroup`` answers 1102
+        for adds) - use :meth:`change_topology` to add nodes.
+        """
+        data: dict = {}
+        if count is not None:
+            data["count"] = count
+        if fixed_cloudlets is not None:
+            data["fixedCloudlets"] = fixed_cloudlets
+        if flexible_cloudlets is not None:
+            data["flexibleCloudlets"] = flexible_cloudlets
+        return await self._request(
+            "environment/control/rest/applynodegroupdata",
+            json_body={"envName": env_name, "nodeGroup": node_group,
+                       "data": data})
 
     async def deploy_archive(self, env_name: str, *, context: str = "ROOT",
                              url: Optional[str] = None,
                              archive: Optional[str] = None,
                              node_group: Optional[str] = None) -> dict:
+        """Deploy an archive into an environment context.
+
+        The live wire shape is ``fileUrl`` + ``fileName`` (VHC 8.15.1 rejects
+        ``url``/``archive``): a ``url`` maps to ``fileUrl`` with a derived
+        ``fileName``, and a pre-uploaded ``archive`` name maps to ``fileName``.
+        """
+        form: dict = {"envName": env_name, "context": context,
+                      "nodeGroup": node_group}
+        if url:
+            form["fileUrl"] = url
+            form["fileName"] = _archive_file_name(url)
+        elif archive:
+            form["fileName"] = archive
         return await self._request(
-            "environment/deployment/rest/deployarchive",
-            params={"envName": env_name, "context": context, "url": url,
-                    "archive": archive, "nodeGroup": node_group})
+            "environment/deployment/rest/deployarchive", json_body=form)
 
     async def install_jps(self, env_name: str, jps: str, *,
                           settings: Optional[Any] = None,
@@ -377,24 +606,35 @@ class JelasticClient:
             params={"envName": env_name, "jps": jps, "settings": settings,
                     "skipNodeEmails": self._bool(skip_node_emails)})
 
-    async def set_env_variables(self, env_name: str, variables: dict) -> dict:
+    async def set_env_variables(self, env_name: str, variables: dict, *,
+                                node_group: str = "cp") -> dict:
+        """Replace a node group's container env vars (verified live shape:
+        ``setcontainerenvvarsbygroup`` with form ``data={"vars": {...}}``;
+        ``setenvvariables`` does not exist on VHC 8.15.1)."""
         body = await self._request(
-            "environment/control/rest/setenvvariables",
-            json_body={"envName": env_name, "vars": dict(variables)})
-        return body.get("vars", {})
+            "environment/control/rest/setcontainerenvvarsbygroup",
+            json_body={"envName": env_name, "nodeGroup": node_group,
+                       "data": {"vars": dict(variables)}})
+        return body.get("object") or body.get("vars") or {}
 
     async def add_env_variable(self, env_name: str, name: str,
-                               value: str) -> dict:
+                               value: str, *, node_group: str = "cp") -> dict:
+        """Add one container env var (verified live shape:
+        ``addcontainerenvvars`` with form ``vars={"K":"V"}``)."""
         body = await self._request(
             "environment/control/rest/addcontainerenvvars",
-            params={"envName": env_name, "name": name, "value": value})
-        return body.get("vars", {})
+            json_body={"envName": env_name, "nodeGroup": node_group,
+                       "vars": {name: value}})
+        return body.get("object") or body.get("vars") or {}
 
-    async def remove_env_variable(self, env_name: str, name: str) -> dict:
+    async def remove_env_variable(self, env_name: str, name: str, *,
+                                  node_group: str = "cp") -> dict:
+        """Remove one container env var (``removecontainerenvvars``)."""
         body = await self._request(
             "environment/control/rest/removecontainerenvvars",
-            params={"envName": env_name, "name": name})
-        return body.get("vars", {})
+            params={"envName": env_name, "nodeGroup": node_group,
+                    "name": name})
+        return body.get("object") or body.get("vars") or {}
 
     # -- observable-state polling -------------------------------------------
 
@@ -443,14 +683,19 @@ class JelasticClient:
 
     async def wait_nodes_ready(self, env_name: str, *, timeout: float = 120.0,
                                poll_interval: Optional[float] = None) -> dict:
-        """Poll until every node reports status ``ok`` (topology/scaling done)."""
+        """Poll until every node reports ready (topology/scaling done).
+
+        Node status is string ``"ok"`` on classic stands and numeric ``1`` on
+        VHC 8.15.1 - both count as ready.
+        """
         interval = poll_interval if poll_interval is not None else self.poll_interval
         deadline = time.monotonic() + timeout
         observed: Any = None
         while True:
             observed = await self.env_info(env_name)
             nodes = observed.get("nodes", [])
-            if nodes and all(n.get("status") == "ok" for n in nodes):
+            if nodes and all(n.get("status") in ("ok", "running", 1)
+                             for n in nodes):
                 return observed
             if time.monotonic() >= deadline:
                 raise OperationTimeout(
