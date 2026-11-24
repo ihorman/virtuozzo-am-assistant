@@ -71,14 +71,15 @@
   }
 
   /** Continue the dashboard's background seamlessly (DESIGN.md): the panel
-   *  adopts the sampled page background and flips its tokens for light pages. */
+   *  adopts the sampled page background and flips its tokens for light pages.
+   *  Applied to BOTH <html> and <body> so overscroll/edges match too. */
   function applyTheme(theme) {
-    if (!theme) return;
+    if (!theme || !theme.color) return;
     try {
-      if (theme.color) document.body.style.backgroundColor = theme.color;
-      /* Drop our decorative gradient when the page provides its own image;
-       * otherwise keep the sampled flat color exactly as-is. */
-      document.body.style.backgroundImage = theme.image || "none";
+      for (const el of [document.documentElement, document.body]) {
+        el.style.backgroundColor = theme.color;
+        el.style.backgroundImage = theme.image || "none";
+      }
       document.body.classList.toggle("light", Boolean(theme.light));
     } catch (_err) {
       /* keep design-system defaults */

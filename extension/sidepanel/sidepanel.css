@@ -201,9 +201,10 @@ body {
 }
 
 .chip:hover {
-  background: var(--surface-2);
-  border-color: rgba(59, 130, 246, 0.5);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.22), rgba(59, 130, 246, 0.10));
+  border-color: rgba(59, 130, 246, 0.6);
   transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.25);
 }
 
 .chip:active { transform: translateY(0); }
@@ -215,26 +216,32 @@ body {
 .msg-user {
   align-self: flex-end;
   max-width: 85%;
-  padding: 10px 14px;
-  border-radius: 16px 16px 4px 16px;
-  background: var(--accent-grad);
+  padding: 10px 15px;
+  border-radius: 18px 18px 5px 18px;
+  background: linear-gradient(135deg, #2B5CB8, #3B82F6 55%, #4E8FF7);
   color: #fff;
   font-size: 13.5px;
   animation: enter 200ms ease-out;
   overflow-wrap: break-word;
+  box-shadow: 0 6px 18px rgba(59, 130, 246, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 .msg-assistant {
   align-self: stretch;
-  padding: 12px 14px;
-  border-radius: var(--radius);
+  padding: 12px 15px;
+  border-radius: 5px 18px 18px 18px;
   border: 1px solid var(--border);
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03)),
+    var(--surface);
   backdrop-filter: blur(16px);
   font-size: 13.5px;
   animation: enter 200ms ease-out;
   overflow-wrap: break-word;
   min-width: 0;
+  box-shadow: 0 8px 22px rgba(11, 18, 32, 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 @keyframes enter {
@@ -338,7 +345,8 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--muted);
+  background: linear-gradient(135deg, var(--accent), #7DB4FF);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
   animation: wave 1.2s ease-in-out infinite;
 }
 
@@ -387,11 +395,15 @@ body {
   align-self: stretch;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    var(--surface);
   backdrop-filter: blur(16px);
   padding: 14px;
   animation: enter 200ms ease-out;
   min-width: 0;
+  box-shadow: 0 10px 26px rgba(11, 18, 32, 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 .card-title {
@@ -436,6 +448,8 @@ body {
   background: var(--accent-grad);
   border-color: transparent;
   color: #fff;
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 .btn.ghost { background: transparent; }
@@ -639,7 +653,11 @@ body {
   transition: border-color 150ms ease-out;
 }
 
-.composer-box:focus-within { border-color: rgba(59, 130, 246, 0.6); }
+.composer-box:focus-within {
+  border-color: rgba(59, 130, 246, 0.65);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18),
+              0 10px 26px rgba(11, 18, 32, 0.22);
+}
 
 #input {
   flex: 1 1 auto;

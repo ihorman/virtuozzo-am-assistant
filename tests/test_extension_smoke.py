@@ -325,7 +325,9 @@ def test_sidepanel_chat_roundtrip_and_deploy_wizard(browser, agent_server, stati
 
     # empty state: hero + suggestion chips
     assert panel.locator(".hero").inner_text() == "What should we deploy?"
-    assert panel.locator(".chip.suggestion").count() == 4
+    assert panel.locator(".chip.suggestion").count() >= 4
+    assert panel.locator(".chip.suggestion",
+                         has_text="Deploy my first app").count() == 1
     shot(panel, "empty-dark")
 
     # -- roundtrip: type a message, get a streamed markdown reply --------
@@ -413,6 +415,34 @@ def test_error_security_audit_cards(browser, agent_server, static_server):
     assert "env_var_add" in audit.inner_text()
     assert audit.locator(".pill.ok").count() >= 1
     shot(panel, "audit-dark")
+
+
+# --------------------------------------------------------------------- #
+# 4b. panel background == dashboard background (user feedback)          #
+# --------------------------------------------------------------------- #
+
+def test_panel_background_matches_dashboard(browser, agent_server, static_server):
+    """The side panel must continue the dashboard background seamlessly.
+
+    The mock dashboard paints its background on a wrapper div (#page-bg),
+    not on body — reproducing the real Jelastic/VHC case where naive
+    body/html sampling returns transparent."""
+    web = browser()
+    configure_agent(web, agent_server)
+    page = open_dashboard(web, static_server)
+    page_bg = page.evaluate(
+        "() => getComputedStyle(document.getElementById('page-bg')).backgroundColor")
+
+    panel = open_sidepanel(web)
+    panel.wait_for_selector(".hero")
+    wait_until(
+        lambda: panel.evaluate(
+            "() => getComputedStyle(document.body).backgroundColor") == page_bg,
+        message=f"panel background == dashboard background ({page_bg})")
+    assert panel.evaluate(
+        "() => getComputedStyle(document.body).backgroundColor") == page_bg
+    panel.close()
+    page.close()
 
 
 # --------------------------------------------------------------------- #

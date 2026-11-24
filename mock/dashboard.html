@@ -18,10 +18,18 @@
       --orange: #F97316;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    /* Reproduces the real-dashboard case: the background is painted on a
+     * wrapper div, NOT on body — the theme sampler must find it. */
     body {
-      background: var(--bg);
+      background: transparent;
       color: var(--text);
       font: 400 14px/1.5 Inter, system-ui, sans-serif;
+    }
+    #page-bg {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: -1;
     }
     header {
       display: flex;
@@ -82,6 +90,7 @@
   </style>
 </head>
 <body>
+  <div id="page-bg"></div>
   <header>
     <div class="logo"><div class="mark"></div> Virtuozzo Application Manager</div>
     <nav>

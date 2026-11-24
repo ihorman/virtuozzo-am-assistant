@@ -40,24 +40,60 @@
 
   /* ---------------- context capture ---------------- */
 
-  /** Sample the dashboard's rendered background so the side panel can
+  /** Sample the dashboard's ACTUALLY PAINTED background so the side panel can
    *  continue it seamlessly (DESIGN.md: the panel must not differ from the
-   *  dashboard background). Returns {color, image, light}. */
+   *  dashboard background). Many dashboards (Jelastic/VHC included) paint the
+   *  background on a wrapper <div>, not on body/html — so walk the element
+   *  stack at several viewport points and take the dominant non-transparent
+   *  color; fall back to <meta name="theme-color">. Returns
+   *  {color, image, light}. */
   function sampleTheme() {
     try {
-      const bodyStyle = getComputedStyle(document.body);
-      const htmlStyle = getComputedStyle(document.documentElement);
-      let color = bodyStyle.backgroundColor;
-      if (!color || /rgba\(0, 0, 0, 0\)|transparent/.test(color)) {
-        color = htmlStyle.backgroundColor;
+      const points = [
+        [window.innerWidth * 0.5, window.innerHeight * 0.08],
+        [window.innerWidth * 0.5, window.innerHeight * 0.5],
+        [window.innerWidth * 0.08, window.innerHeight * 0.85],
+        [window.innerWidth * 0.9, window.innerHeight * 0.85],
+      ];
+      const counts = new Map();
+      let image = null;
+      for (const [x, y] of points) {
+        let stack = [];
+        if (document.elementsFromPoint) {
+          stack = document.elementsFromPoint(x, y);
+        }
+        stack = stack.concat([document.body, document.documentElement]);
+        /* The page background is the TOPMOST FULL-BLEED painted layer:
+         * cards/headers are painted too but never cover >=80% of the
+         * viewport, so they are skipped; wrapper-div backgrounds (the
+         * Jelastic/VHC case) are found because they do cover it. */
+        for (const el of stack) {
+          if (!el || el.nodeType !== 1) continue;
+          const cs = getComputedStyle(el);
+          const bg = cs.backgroundColor;
+          if (!bg || /rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(bg)) continue;
+          const rect = el.getBoundingClientRect();
+          const fullBleed =
+            rect.width >= window.innerWidth * 0.8 &&
+            rect.height >= window.innerHeight * 0.8;
+          if (!fullBleed) continue;
+          counts.set(bg, (counts.get(bg) || 0) + 1);
+          if (!image && cs.backgroundImage && cs.backgroundImage !== "none") {
+            image = cs.backgroundImage;
+          }
+          break;
+        }
       }
-      const image =
-        bodyStyle.backgroundImage && bodyStyle.backgroundImage !== "none"
-          ? bodyStyle.backgroundImage
-          : htmlStyle.backgroundImage && htmlStyle.backgroundImage !== "none"
-            ? htmlStyle.backgroundImage
-            : null;
-      const m = String(color).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      let color = null;
+      let best = 0;
+      for (const [c, n] of counts) {
+        if (n > best) { best = n; color = c; }
+      }
+      if (!color) {
+        const meta = document.querySelector('meta[name="theme-color"]');
+        if (meta && meta.content) color = meta.content;
+      }
+      const m = String(color || "").match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
       let light = false;
       if (m) {
         const chan = [Number(m[1]), Number(m[2]), Number(m[3])].map((v) => {
@@ -66,7 +102,7 @@
         });
         light = 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2] > 0.4;
       }
-      return { color: color || null, image, light };
+      return color ? { color, image, light } : null;
     } catch (_err) {
       return null;
     }
