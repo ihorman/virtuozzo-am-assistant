@@ -212,6 +212,30 @@ def shot(page, name: str) -> str:
     return str(path)
 
 
+def wait_until(predicate, timeout: float = 15.0, interval: float = 0.1,
+               message: str = ""):
+    """Poll ``predicate`` (Python callable) until it returns truthy.
+
+    Non-eval replacement for ``page.wait_for_function`` string predicates:
+    MV3 extension pages enforce ``script-src 'self'`` (no ``unsafe-eval``),
+    so Playwright's string-eval wait raises EvalError on chrome-extension://
+    pages. Poll locator reads (``inner_text``/``get_attribute``) instead —
+    same pattern as ``tests/helpers.py::wait_status_raw``.
+    """
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = predicate()
+        except Exception:  # DOM race during render — keep polling
+            last = None
+        if last:
+            return last
+        time.sleep(interval)
+    raise AssertionError(
+        f"timed out after {timeout}s waiting for {message!r} (last={last!r})")
+
+
 def configure_agent(browser: Browser, agent_url: str) -> None:
     """Point the extension at the mock agent via the options page."""
     page = browser.page_for("options/options.html", viewport={"width": 900, "height": 800})
@@ -248,8 +272,8 @@ def test_fab_renders_on_mock_dashboard(browser, static_server):
 
     fab.click()
     host = page.locator("#vap-copilot-fab-root")
-    page.wait_for_function(
-        "document.querySelector('#vap-copilot-fab-root')?.dataset.opened")
+    wait_until(lambda: host.get_attribute("data-opened"),
+               message="#vap-copilot-fab-root[data-opened]")
     opened_via = host.get_attribute("data-opened")
     assert opened_via in ("sidePanel", "tab"), f"unexpected open path: {opened_via}"
 
@@ -267,8 +291,9 @@ def test_options_page_configures_agent(browser, agent_server):
     page.wait_for_selector("#save-note:not([hidden])")
 
     page.click("#btn-health")
-    page.wait_for_function(
-        "document.querySelector('#diagnostics').textContent.includes('reachable')")
+    diagnostics = page.locator("#diagnostics")
+    wait_until(lambda: "reachable" in diagnostics.inner_text(),
+               message="#diagnostics includes 'reachable'")
     assert "llm configured" in page.locator("#diagnostics").inner_text()
     page.close()
 
@@ -297,8 +322,9 @@ def test_sidepanel_chat_roundtrip_and_deploy_wizard(browser, agent_server, stati
     panel.press("#input", "Enter")
     panel.wait_for_selector(".msg-user")
     panel.wait_for_selector(".msg-assistant .md")
-    panel.wait_for_function(
-        "document.querySelector('.msg-assistant .md').innerText.includes(\"I'm your\")")
+    first_md = panel.locator(".msg-assistant .md").first
+    wait_until(lambda: "I'm your" in first_md.inner_text(),
+               message=".msg-assistant .md includes \"I'm your\"")
     assert panel.locator(".msg-assistant .md code").count() >= 1   # markdown code
     assert panel.locator(".md-copy").count() >= 1                  # copy buttons
     shot(panel, "hello-dark")
