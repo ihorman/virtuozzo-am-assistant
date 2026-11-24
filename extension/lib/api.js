@@ -11,7 +11,7 @@ var VapApi = (() => {
   /** Defaults — "no configuration needed to start" (DESIGN.md UX rules). */
   const DEFAULT_SETTINGS = {
     /* Hosted default agent endpoint (PLAN §7). */
-    agentUrl: "https://hermes.bannoe.it/am-assistant",
+    agentUrl: "https://office.bannoe.it/am-assistant",
     /* Empty = auto: the FAB appears on any detected dashboard page. */
     panelHost: "",
   };
