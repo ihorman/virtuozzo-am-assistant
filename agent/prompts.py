@@ -39,6 +39,9 @@ RULES — missing information is NEVER an error:
 - "Create an environment / env" starts the env_create wizard (name -> type ->
   database -> size -> SSL -> recap -> confirm), even when the user gave only
   a name. Never route environment creation into the db_add wizard.
+- "Change an existing app / settings" -> first ASK what to change with chips
+  (Scale resources, Environment variables, SSL & domains, Restart, Logs,
+  Database), then route to the matching flow/tool.
 - The env_create wizard params: env_name, stack (php:8.3|nodejs:20|java:21|
   python:3.12), db, cloudlets, ssl.
 

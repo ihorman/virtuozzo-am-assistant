@@ -324,10 +324,10 @@ def test_sidepanel_chat_roundtrip_and_deploy_wizard(browser, agent_server, stati
     assert panel.locator("#env-name").inner_text() == "my-demo-env"
 
     # empty state: hero + suggestion chips
-    assert panel.locator(".hero").inner_text() == "What should we deploy?"
+    assert panel.locator(".hero").inner_text() == "What are we doing today?"
     assert panel.locator(".chip.suggestion").count() >= 4
     assert panel.locator(".chip.suggestion",
-                         has_text="Deploy my first app").count() == 1
+                         has_text="Deploy a new application").count() == 1
     shot(panel, "empty-dark")
 
     # -- roundtrip: type a message, get a streamed markdown reply --------
@@ -343,7 +343,7 @@ def test_sidepanel_chat_roundtrip_and_deploy_wizard(browser, agent_server, stati
     shot(panel, "hello-dark")
 
     # -- guided flow: ask -> confirm -> progress -> success --------------
-    panel.locator(".chip.suggestion", has_text="Deploy my first app").click()
+    panel.locator(".chip.suggestion", has_text="Deploy a new application").click()
 
     panel.wait_for_selector(".card.ask")
     assert panel.locator(".card.ask .steps .step").count() >= 2
@@ -498,7 +498,7 @@ def test_light_theme_screenshots(browser, agent_server):
     panel.wait_for_selector(".hero")
     shot(panel, "empty-light")
 
-    panel.locator(".chip.suggestion", has_text="Deploy my first app").click()
+    panel.locator(".chip.suggestion", has_text="Deploy a new application").click()
     panel.wait_for_selector(".card.ask")
     shot(panel, "ask-light")
 
