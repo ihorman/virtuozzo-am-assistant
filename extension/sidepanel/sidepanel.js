@@ -247,7 +247,10 @@
     const port = chrome.runtime.connect({ name: "fetch-proxy" });
     const requestId = "chat-" + Date.now();
 
+    let finished = false;
     const finish = () => {
+      if (finished) return;
+      finished = true;
       if (ctx.typing) {
         ctx.typing.remove();
         ctx.typing = null;
@@ -256,6 +259,19 @@
       setBusy(false);
       el.input.focus();
     };
+
+    /* The service may restart mid-stream (deploy, crash): without this the
+     * panel stayed 'busy' forever and every chip/input went silently dead. */
+    port.onDisconnect.addListener(() => {
+      if (finished) return;
+      if (chrome.runtime.lastError) {
+        renderErrorCard(turn, "network_error", chrome.runtime.lastError.message);
+      } else {
+        renderErrorCard(turn, "network_error",
+          "the connection dropped — the assistant service may have restarted");
+      }
+      finish();
+    });
 
     port.onMessage.addListener((message) => {
       if (!message || message.id !== requestId) return;
@@ -276,7 +292,7 @@
           ctx.typing = null;
         }
         renderErrorCard(turn, "network_error", message.message);
-        setBusy(false);
+        finish();
       }
     });
 
