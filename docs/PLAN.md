@@ -270,9 +270,12 @@ variables, async status transitions. Used for:
   (path route `/am-assistant/*` -> local uvicorn port; Caddyfile is shared and
   heavily proxied: full review + backup before the single-block addition,
   then `caddy reload` + curl verification).
-- **LLM: Xiaomi MiMo `mimo-v2.6-pro`** via the OpenAI-compatible endpoint
+- **LLM: Xiaomi MiMo `mimo-v2.6-flash`** (fast interactive answers;
+  `VAP_LLM_REASONING_EFFORT=none` — the assistant is a guide, not a
+  deliberator; `mimo-v2.6-pro` remains available on request) via the
+  OpenAI-compatible endpoint
   (`VAP_LLM_BASE_URL=https://token-plan-sgp.xiaomimimo.com/v1`,
-  `VAP_LLM_MODEL=mimo-v2.6-pro`, `VAP_LLM_API_KEY` from server env — never
+  `VAP_LLM_MODEL=mimo-v2.6-flash`, `VAP_LLM_API_KEY` from server env — never
   committed). E2E-verified: a real chat completion must return through MiMo
   before the deployment is called done.
 - `deploy/Dockerfile` — mcp + agent in one container (uvicorn), env-configured.
