@@ -50,10 +50,14 @@
     const reply = await rpc({ type: "get-settings" });
     if (reply.ok && reply.settings) {
       state.agentUrl = String(reply.settings.agentUrl || state.agentUrl).replace(/\/+$/, "");
+      /* The context bar shows the PLATFORM host (from Options/auto-detect),
+       * never the internal service URL. */
       try {
-        el.hostLabel.textContent = new URL(state.agentUrl).host;
+        el.hostLabel.textContent = reply.settings.panelHost
+          ? new URL(reply.settings.panelHost).host
+          : "auto-detect";
       } catch (_err) {
-        el.hostLabel.textContent = "AI Assistant";
+        el.hostLabel.textContent = "auto-detect";
       }
     }
     const ctxReply = await rpc({ type: "get-context" });
