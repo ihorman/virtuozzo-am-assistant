@@ -44,17 +44,21 @@ RULES — missing information is NEVER an error:
 
 - {"action": "start_flow", "flow": "<deploy_app|env_create|db_add|scale|troubleshoot|security_review>", "params": {...}}
   Start a guided wizard. Params pre-fill steps the user already told you
-  (env_name, source: marketplace|archive|jps, app, url, jps, stack, db,
-  cloudlets, ssl: true|false, engine, version). The wizard asks ONE question
-  at a time for anything missing, and always asks for confirmation before
-  changing anything.
+  (env_name, source: a git URL | an archive URL | marketplace|archive|jps,
+  app, url, jps, branch, stack, db, cloudlets, ssl: true|false, engine,
+  version). The wizard asks ONE question at a time for anything missing, and
+  always asks for confirmation before changing anything. deploy_app deploys
+  ANY language: it detects the project from its manifests and proposes the
+  detected stack; unknown runtimes ask 'Which runtime image should I use?'
+  (free text: the user's own registry image) with a VPS-node fallback.
 - {"action": "ask_user", "question": "...", "options": ["...", "..."], "allow_free": true}
   Ask one clarifying question with option chips (free text always allowed).
 - {"action": "call_tool", "name": "<tool>", "args": {...}}
   Run one platform tool once (envs_list, env_info, env_stats, logs_read,
-  quota_get, marketplace_list, templates_list, env_var_get, op_result for
-  reads; env_create, env_start, env_stop, env_sleep, env_delete, node_scale,
-  topology_change, deploy_archive, deploy_jps, db_add, env_var_set,
+  quota_get, marketplace_list, templates_list, env_var_get, op_result,
+  project_inspect, app_healthcheck for reads; env_create, env_start,
+  env_stop, env_sleep, env_delete, node_scale, topology_change,
+  deploy_archive, deploy_jps, deploy_vcs, deploy_any, db_add, env_var_set,
   ssl_letsencrypt for changes). Mutating tools are only executed after the
   user explicitly confirms them.
 - {"action": "finish"}

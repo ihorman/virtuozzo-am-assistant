@@ -54,6 +54,22 @@ def _stub_dns(monkeypatch):
                         lambda host: ["93.184.216.34"])
 
 
+@pytest.fixture(autouse=True)
+def _stub_http_fetch(monkeypatch):
+    """No real HTTP in tests: the deployment-source fetch seam
+    (``mcp.tools.http_fetch``) answers with a small healthy page by default.
+    Tests exercising project_inspect / app_healthcheck override it per-case."""
+    import mcp.tools as mcp_tools
+
+    async def fake_fetch(url, *, timeout=10.0, max_bytes=1 << 25):
+        return {"status": 200, "headers": {"content-type": "text/html"},
+                "body": (b"<html><head><title>Mock app</title></head>"
+                         b"<body>ok</body></html>"),
+                "url": url, "truncated": False}
+
+    monkeypatch.setattr(mcp_tools, "http_fetch", fake_fetch)
+
+
 @pytest.fixture
 def state() -> MockJelastic:
     return MockJelastic(MockConfig(transition_seconds=TRANSITION))

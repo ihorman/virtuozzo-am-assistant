@@ -381,7 +381,7 @@ def test_serve_bridge_full_handshake(isolated_home, transport, raw, state):
     assert msgs[1]["result"]["serverInfo"]["name"] == "virtuozzo-am-mcp"
     listed = {t["name"] for t in msgs[2]["result"]["tools"]}
     assert listed == set(TOOLS)  # same tool surface as mcp/ server
-    assert len(listed) == 21
+    assert len(listed) == len(TOOLS)
     call = msgs[3]["result"]
     assert call.get("isError") is not True, call
     # auth passthrough: the call reached the platform as the logged-in user
@@ -399,7 +399,8 @@ def test_serve_reads_config_without_flags(isolated_home, transport, raw, state):
               stdin=stdin, stdout=stdout)
     assert rc == 0
     msgs = _responses(stdout)
-    assert len(msgs[1]["result"]["tools"]) == 21
+    from mcp.tools import TOOLS
+    assert len(msgs[1]["result"]["tools"]) == len(TOOLS)
 
 
 def test_serve_without_credentials_fails_clearly(isolated_home, capsys):

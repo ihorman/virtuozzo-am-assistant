@@ -26,6 +26,8 @@ from .tools import ToolOutcome
 from .tools_util import SECRET_VAR_RE, mask_value, slugify_env_name
 
 from mcp.tools import TOOLS
+from mcp.deploy_templates import (language_display, language_tier,
+                                  looks_like_git_url, normalize_git_url)
 
 #: platform env names: lowercase letter, then letters/digits/dashes (<=30)
 ENV_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
@@ -58,6 +60,34 @@ def _marketplace_manifest(app_name: str) -> str:
 
 # --- small normalizers ------------------------------------------------------
 
+_URL_IN_TEXT = re.compile(r"(?:https?://|git@)\S+")
+
+
+def _extract_source_url(text: str) -> Optional[str]:
+    """'deploy my app from https://github.com/o/r' -> the URL."""
+    match = _URL_IN_TEXT.search(text or "")
+    return match.group(0).rstrip(").,;]") if match else None
+
+
+def _classify_source(answer: str) -> Optional[str]:
+    """Answer text -> source kind: git | archive | marketplace | jps.
+
+    Accepts plain URLs (git or archive), SSH-style git URLs and URLs buried
+    in free text ('deploy my Rust app from <git url>').
+    """
+    value = (answer or "").strip()
+    if not value:
+        return None
+    candidate = _extract_source_url(value)
+    if candidate:
+        return ("git" if looks_like_git_url(candidate) else "archive")
+    lowered = value.lower()
+    if re.search(r"\bgit(?:hub|lab)?\b", lowered) or "repository" in lowered \
+            or "repo" in lowered:
+        return "git"
+    return _normalize_source(value)
+
+
 def _normalize_source(answer: str) -> Optional[str]:
     mapped = match_option(answer, ["Marketplace", "Archive URL", "JPS package"])
     lowered = mapped.lower()
@@ -68,6 +98,33 @@ def _normalize_source(answer: str) -> Optional[str]:
     if "archive" in lowered:
         return "archive"
     return None
+
+
+def _map_stack_answer(answer: str) -> Tuple[int, Optional[str], str]:
+    """Stack/image answer -> (tier, runtime_image, stack) via the tiered
+    deploy table. Anything unrecognized is treated as a user-supplied
+    registry image (tier 3) - the wizard must always reach a deploy plan.
+    """
+    text = (answer or "").strip()
+    if "vps" in text.lower() and "node" in text.lower():
+        return 4, "vps", "vps"
+    if re.match(r"^(nodejs|python|java|php|ruby|golang|go|dotnet)(:|$)",
+                text):
+        return 1, None, text
+    image = text if (":" in text or "/" in text) else f"{text}:latest"
+    return 3, image, f"docker:{image}"
+
+
+async def _ask_runtime_image(ctx: FlowContext
+                             ) -> Tuple[int, Optional[str], str]:
+    """Universal-start guarantee: an unknown runtime never errors out - we
+    ask which runtime image to use (free text allowed: the user's own
+    registry image) with the Tier 4 VPS bootstrap as the fallback chip."""
+    answer = await ctx.ask(
+        "Which runtime image should I use?",
+        ["Deploy on a VPS node (bootstrap script)", "nodejs:20",
+         "python:3.12", "php:8.3", "java:21"])
+    return _map_stack_answer(answer)
 
 
 def _normalize_db(answer: str) -> Optional[str]:
@@ -398,20 +455,33 @@ async def security_review(ctx: FlowContext, env_name: str, *,
 # --- flow 1: deploy app -----------------------------------------------------
 
 async def deploy_app(ctx: FlowContext) -> None:
+    """Deploy ANY application (deploy-anything wizard, T12).
+
+    Source: git URL / archive URL / marketplace / JPS. Git and archive
+    sources run ``project_inspect`` so the stack step can propose the
+    DETECTED stack as its primary chip; the deploy step routes through the
+    tiered deploy table (tier 1 native stack + VCS/archive deploy, tier 2/3
+    runtime-image deploy via ``deploy_any``, tier 4 VPS bootstrap) and the
+    verify chain is op_result(nodes_ready) -> curl -> app_healthcheck ->
+    success card, or error -> diagnose -> auto-fix. The wizard ALWAYS
+    reaches a deployable answer - unknown languages ask for a runtime image.
+    """
     p = ctx.params
 
     # 1. source -----------------------------------------------------------
-    source = _normalize_source(str(p.get("source") or "")) if p.get("source") \
+    source = _classify_source(str(p.get("source") or "")) if p.get("source") \
         else None
     if source is None:
         answer = await ctx.ask(
             "Where is your application coming from?",
-            ["Marketplace", "Archive URL", "JPS package"])
-        source = _normalize_source(answer) or "archive"
+            ["Git repository", "Marketplace", "Archive URL", "JPS package"])
+        source = _classify_source(answer) or "archive"
 
     app_desc = ""
     jps_manifest = None
     archive_url = None
+    git_url = None
+    detection = None
     if source == "marketplace":
         catalog = await ctx.run_tool("marketplace_list", {"category": 1})
         names = [str(a.get("name")) for a in
@@ -425,22 +495,49 @@ async def deploy_app(ctx: FlowContext) -> None:
             if names:
                 app_desc = match_option(app_desc, names)
         jps_manifest = _marketplace_manifest(app_desc)
-    elif source == "archive":
-        archive_url = str(p.get("url") or "") or await ctx.ask(
-            "What is the URL of your application archive (.tar/.zip)?",
-            allow_free=True,
-            validate=lambda a: (None if a.strip().startswith(
-                ("http://", "https://"))
-                else "Please give an http(s) URL to the archive."))
-        archive_url = archive_url.strip()
-        app_desc = archive_url
-    else:  # jps
+    elif source == "jps":
         jps_manifest = str(p.get("jps") or "") or await ctx.ask(
             "Paste the JPS package (a manifest URL or the manifest itself):",
             allow_free=True)
         jps_manifest = jps_manifest.strip()
         app_desc = jps_manifest if jps_manifest.startswith(
             ("http://", "https://")) else "an inline JPS package"
+    else:
+        # git repository or source archive: find the URL (params, free text
+        # like 'deploy my app from <url>', or one guiding question).
+        raw_url = ""
+        if p.get("source"):
+            raw_url = _extract_source_url(str(p["source"])) or \
+                (str(p["source"]).strip() if str(p["source"]).strip().startswith(
+                    ("http://", "https://", "git@")) else "")
+        raw_url = raw_url or str(p.get("url") or "").strip()
+        if not raw_url:
+            if source == "git":
+                question = "What is the Git repository URL?"
+                valid = ("http://", "https://", "git@")
+            else:
+                question = ("What is the URL of your application archive "
+                            "(.tar/.zip)?")
+                valid = ("http://", "https://")
+            raw_url = (await ctx.ask(
+                question, allow_free=True,
+                validate=lambda a: (None if a.strip().startswith(valid)
+                                    else "Please give an http(s) URL."))
+                       ).strip()
+        raw_url = normalize_git_url(_extract_source_url(raw_url) or raw_url)
+        if source == "git":
+            git_url = raw_url
+        else:
+            archive_url = raw_url
+        app_desc = raw_url
+        # project_inspect detects language/version/evidence -> the stack
+        # step proposes it as the primary chip (skipped when the caller
+        # already pinned the stack).
+        if not str(p.get("stack") or "").strip():
+            insp = await ctx.run_tool("project_inspect",
+                                      {"source_url": raw_url})
+            if insp.ok:
+                detection = insp.payload
 
     # 2. target environment ------------------------------------------------
     creating = False
@@ -471,17 +568,56 @@ async def deploy_app(ctx: FlowContext) -> None:
                 return ("Please use lowercase letters, digits and dashes "
                         "(must start with a letter, max 30 characters).")
             if name in existing:
-                return f"[{name}] already exists — pick a different name."
+                return f"[{name}] already exists -- pick a different name."
             return None
 
         env_name = (env_name or await ctx.ask(
             "What should the new environment be called?",
             allow_free=True, validate=_check_name)).strip()
 
-    # 3. topology ----------------------------------------------------------
-    stack = str(p.get("stack") or "").strip() or await ctx.ask(
-        "Which application stack?",
-        ["php:8.3", "nodejs:20", "java:21", "python:3.12"])
+    # 3. topology: the DETECTED stack is the primary chip ------------------
+    stack = str(p.get("stack") or "").strip()
+    runtime_image = None
+    deploy_port = None
+    tier = 1
+    detected = (detection or {}).get("detected") or []
+    primary = None
+    if detected:
+        first = detected[0]
+        version = f" {first.get('version')}" if first.get("version") else ""
+        primary = (f"{language_display(str(first.get('type') or ''))}"
+                   f"{version} "
+                   f"(detected from {first.get('evidence') or 'its manifest'})")
+    manual = ["nodejs:20", "python:3.12", "php:8.3", "java:21"]
+    if not stack:
+        if primary is not None:
+            answer = await ctx.ask("Which application stack?",
+                                   [primary] + manual)
+        elif source in ("git", "archive"):
+            answer = await ctx.ask(
+                "Which runtime image should I use?",
+                ["Deploy on a VPS node (bootstrap script)"] + manual)
+        else:
+            answer = await ctx.ask("Which application stack?", manual)
+        stack = answer
+    # route the answer through the tiered deploy table
+    if source in ("git", "archive"):
+        if primary is not None and stack == primary:
+            kind = str(detected[0].get("type") or "")
+            deploy_port = (detection or {}).get("suggested_port")
+            runtime_image = (detection or {}).get("suggested_runtime_image")
+            if language_tier(kind) == 1:
+                tier = 1
+                stack = (detection or {}).get("suggested_stack") or stack
+            elif runtime_image:
+                tier = 2
+                stack = f"docker:{runtime_image}"
+            else:
+                tier, runtime_image, stack = await _ask_runtime_image(ctx)
+        else:
+            tier, runtime_image, stack = _map_stack_answer(stack)
+
+    # 4. resources ---------------------------------------------------------
     db = None
     if p.get("db") is not None:
         db = _normalize_db(str(p["db"])) if p["db"] else None
@@ -491,7 +627,6 @@ async def deploy_app(ctx: FlowContext) -> None:
             ["No database", "MySQL 8.0", "MariaDB 10.11", "PostgreSQL 16",
              "Redis 7.2"]))
 
-    # 4. resources ---------------------------------------------------------
     cloudlets = _parse_cloudlets(str(p["cloudlets"])) if p.get("cloudlets") \
         else _parse_cloudlets(await ctx.ask(
             "How much power should it get?",
@@ -512,7 +647,7 @@ async def deploy_app(ctx: FlowContext) -> None:
     approved = await ctx.confirm(recap, actions=["create environment",
                                                  "deploy application"])
     if not approved:
-        await ctx.say("Cancelled — I changed nothing.")
+        await ctx.say("Cancelled -- I changed nothing.")
         return
 
     # execute --------------------------------------------------------------
@@ -534,11 +669,29 @@ async def deploy_app(ctx: FlowContext) -> None:
             "timeout": 60}, progress="Waiting for the environment to start")
         if not out.ok or out.payload.get("status") != "done":
             await ctx.say("The environment is still starting up. I will "
-                          "stop here — ask me to continue in a moment.")
+                          "stop here -- ask me to continue in a moment.")
             return
 
-    # deploy the application ----------------------------------------------
-    if source == "archive":
+    # deploy the application (tiered routes) -------------------------------
+    if source == "git" and tier == 1:
+        step_args = {"env_name": env_name, "git_url": git_url,
+                     "context": "ROOT"}
+        branch = str(p.get("branch") or "").strip() or \
+            (detection or {}).get("default_branch")
+        if branch:
+            step_args["branch"] = branch
+        out = await ctx.run_tool("deploy_vcs", step_args, confirmed=True,
+                                 progress="Deploying your application")
+    elif source in ("git", "archive") and tier >= 2:
+        step_args = {"env_name": env_name,
+                     "source_url": git_url or archive_url,
+                     "runtime_image": runtime_image}
+        if deploy_port:
+            step_args["port"] = deploy_port
+        out = await ctx.run_tool("deploy_any", step_args, confirmed=True,
+                                 progress="Building and starting your "
+                                          "application")
+    elif source == "archive":
         step_args = {"env_name": env_name, "url": archive_url,
                      "context": "ROOT"}
         out = await ctx.run_tool("deploy_archive", step_args, confirmed=True,
@@ -561,16 +714,27 @@ async def deploy_app(ctx: FlowContext) -> None:
             progress="Issuing a free SSL certificate")
         if not out.ok:
             await ctx.say("The SSL certificate could not be issued right "
-                          "now — the app itself deployed fine.")
+                          "now -- the app itself deployed fine.")
 
-    # verify (curl the env URL) -------------------------------------------
+    # verify: node readiness -> curl -> did-it-start healthcheck ------------
+    if source in ("git", "archive") and tier >= 2:
+        await ctx.run_tool("op_result", {
+            "env_name": env_name, "op": "nodes_ready", "timeout": 60},
+            progress="Waiting for the application node")
     scheme = "https" if ssl else "http"
     app_url = f"{scheme}://{domain}/" if domain else ""
     if app_url:
         verified = await ctx.verify_url(app_url)
         if not verified.ok:
-            await handle_failure(ctx, verified, step_args={"env_name": env_name})
+            await handle_failure(ctx, verified,
+                                 step_args={"env_name": env_name})
             return
+    health = await ctx.run_tool("app_healthcheck",
+                                {"env_name": env_name, "context": "ROOT"},
+                                progress="Checking the application started")
+    if not health.ok or not health.payload.get("ok"):
+        await handle_failure(ctx, health, step_args={"env_name": env_name})
+        return
 
     # success card ---------------------------------------------------------
     body = (f"- Environment: `{env_name}`\n"
@@ -583,10 +747,13 @@ async def deploy_app(ctx: FlowContext) -> None:
           "payload": {}},
          {"label": "Open dashboard",
           "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+          "payload": {}},
+         {"label": "View logs", "url": "", "action": "open_logs",
           "payload": {}}])
 
     # security review is the last step of the deploy wizard ---------------
     await security_review(ctx, env_name, wait_for_fix=True)
+
 
 
 # --- flow: create environment -----------------------------------------------

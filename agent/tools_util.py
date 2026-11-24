@@ -110,6 +110,34 @@ def summarize(name: str, args: dict, payload: Any, ok: bool) -> str:
     if name == "db_add":
         return (f"database node group added to [{args.get('env_name')}] "
                 f"(asynchronous)")
+    if name == "project_inspect":
+        detected = payload.get("detected") or []
+        if not detected:
+            return ("no known project type detected - the wizard will ask "
+                    "which runtime image to use")
+        first = detected[0]
+        version = f" {first.get('version')}" if first.get("version") else ""
+        more = f" (+{len(detected) - 1} more)" if len(detected) > 1 else ""
+        return (f"detected {first.get('type')}{version} from "
+                f"{first.get('evidence')}{more}")
+    if name == "deploy_vcs":
+        return (f"deployed {args.get('git_url')} "
+                f"(branch {args.get('branch') or 'default'}) to "
+                f"[{args.get('env_name')}] context "
+                f"{args.get('context') or 'ROOT'}")
+    if name == "deploy_any":
+        return (f"installed the generated "
+                f"tier-{payload.get('tier', '?')} manifest for "
+                f"[{args.get('env_name')}] on [{payload.get('runtime_image')}]"
+                f" (port {payload.get('port')})")
+    if name == "app_healthcheck":
+        if payload.get("ok"):
+            title = payload.get("title")
+            return (f"{payload.get('url')} is up (HTTP "
+                    f"{payload.get('status')}"
+                    + (f", title: {title}" if title else "") + ")")
+        return (f"{payload.get('url') or args.get('env_name')} did not start "
+                f"({payload.get('error_class') or 'unknown error'})")
     if name == "logs_read":
         return f"{payload.get('count', 0)} log entry(ies) read"
     if name == "env_var_get":

@@ -595,6 +595,38 @@ class JelasticClient:
         return await self._request(
             "environment/deployment/rest/deployarchive", json_body=form)
 
+    async def vcs_add_repo(self, env_name: str, git_url: str, *,
+                           branch: Optional[str] = None,
+                           context: str = "ROOT") -> dict:
+        """Register a VCS (Git) repo on an environment context.
+
+        Catalog: ``/environment/deployment/rest/addrepo`` (the deployment
+        family is the one carrying addrepo/deploy; the VCS family's
+        ``createproject`` takes the same type/context/url/branch params).
+        """
+        return await self._request(
+            "environment/deployment/rest/addrepo",
+            json_body={"envName": env_name, "context": context,
+                       "url": git_url, "branch": branch, "type": "git"})
+
+    async def vcs_deploy(self, env_name: str, *, context: str = "ROOT") -> dict:
+        """Deploy the registered VCS project into the context
+        (``/environment/deployment/rest/deploy``)."""
+        return await self._request(
+            "environment/deployment/rest/deploy",
+            json_body={"envName": env_name, "context": context})
+
+    async def vcs_update(self, env_name: str, *, context: str = "ROOT") -> dict:
+        """Fetch recent changes and redeploy the VCS project.
+
+        Catalog: ``/environment/deployment/rest/update`` - the "pull latest
+        changes" helper behind the deploy-anything wizard's fetchrecentchanges
+        step.
+        """
+        return await self._request(
+            "environment/deployment/rest/update",
+            json_body={"envName": env_name, "context": context})
+
     async def install_jps(self, env_name: str, jps: str, *,
                           settings: Optional[Any] = None,
                           skip_node_emails: bool = True) -> dict:

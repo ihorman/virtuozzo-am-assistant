@@ -96,10 +96,52 @@ v1 wraps the ~22 methods that cover the end-user flows:
 | `templates_list` | `environment/control/rest/getcontainers`... | stacks/engines available |
 | `quota_get` | `billing/quota/rest/getquotas` | "in your limits" awareness |
 | `op_result` | — | poll async ops; Jelastic ops are fire-and-forget |
+| `project_inspect` | — (source fetch + in-memory manifest detection) | detect language/version/evidence from a git or archive source; SSRF-guarded, 25 MB cap, nothing executed |
+| `deploy_vcs` | `deployment/rest/addrepo` + `deploy` + `update` | git deploy: register the repo, deploy, fetch recent changes |
+| `deploy_any` | `marketplace/jps/rest/install` (generated JPS) | tiered deploy for ANY language: runtime-image manifest or VPS bootstrap |
+| `app_healthcheck` | — (GET the app URL) | "did it start" verify: {status, title, ok, error_class}; powers auto-repair |
 
 Known platform behaviors baked into the client: async ops (never conclude
 failure from a timeout), `deleteenv` needs `password`, session expiry,
 `2212` = deletion already running, per-environment operation serialization.
+
+### Deploy anything - any language (tiered deploy)
+
+An app in ANY language must start (the universal start guarantee). The
+deploy path is tiered and picked automatically from `project_inspect`
+detection (manifests/toolchain files: package.json, requirements.txt,
+pom.xml, composer.json, Gemfile, go.mod, *.csproj, Cargo.toml, mix.exs,
+build.zig, CMakeLists.txt, Makefile, *.cabal, stack.yaml, dune-project,
+shard.yml, pubspec.yaml, Package.swift, *.nimble, deno.json, bunfig.toml,
+Dockerfile, index.html):
+
+| Tier | When | How |
+|---|---|---|
+| 1 - native stack | nodejs, python, java/maven, php, go, ruby, dotnet | deploy directly on the platform stack (`env_create` + `deploy_vcs` for git / `deploy_archive` for archives); Java builds via the Maven build node |
+| 2 - runtime image | rust, elixir, zig, c/cpp, deno, bun, haskell, ocaml, crystal, dart, swift, nim, static | `deploy_any` generates a JPS manifest: docker node from the OFFICIAL runtime image (rust:1.80-slim, eclipse-temurin:21, python:3.12, node:20, golang:1.23, elixir:1.17, ...) + cmd actions that fetch the source, install deps, build and start the app INSIDE the container (no image build) |
+| 3 - user image | user-supplied Dockerfile/registry image | `deploy_any` with `runtime_image` -> docker node from that image |
+| 4 - VPS bootstrap | exotic custom runtime (no usable container image) | `deploy_any` with `runtime_image='vps'` -> VPS node + generated bootstrap script (install toolchain, build, nohup service) |
+
+The wizard ALWAYS reaches a deployable answer: unknown languages map to a
+Docker Hub runtime image by naming convention (crystal -> lang/crystal,
+haskell -> haskell, ocaml -> ocaml/opam, ...); when no image can be inferred
+the wizard asks "Which runtime image should I use?" (free text: the user's
+own registry image) with the Tier 4 VPS fallback as a chip.
+
+Generated manifests (`mcp/deploy_templates.py`) are deterministic,
+ASCII-only YAML with every script embedded base64-encoded (they round-trip
+byte-exact); the app is always started with `nohup setsid` and told to bind
+`0.0.0.0:$PORT` (the port comes from framework conventions - express/fastify
+3000, flask/django 8000/8080, spring 8080, rails 3000, phoenix 4000,
+actix/axum 8080 - overridable via the `PORT` env var).
+
+`deploy_vcs` registers + deploys + syncs a git repo through the platform VCS
+endpoints (`/environment/deployment/rest/addrepo` + `deploy` + `update`;
+`update` is the catalog's fetch-recent-changes helper). The deploy wizard's
+verify chain is `op_result(nodes_ready)` -> `verify_http` (curl the env URL)
+-> `app_healthcheck` (did it start: status/title/error_class) -> success
+card (Open app / Open dashboard / View logs) or error -> diagnose ->
+auto-fix; the security review card stays the last step.
 
 **Scope confinement (mandatory)**: the MCP server must never be usable as a
 general-purpose tool for the model. Closed tool surface (no fetch/exec/file),

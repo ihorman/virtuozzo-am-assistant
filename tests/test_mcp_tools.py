@@ -29,13 +29,16 @@ from mcp.server import MCPServer, SERVER_NAME
 from mcp.tools import AuthConfig, NoCredentialsError, TOOLS
 from tests.helpers import TRANSITION, run, signin_raw, wait_status_raw
 
-# The frozen v1 tool surface from docs/PLAN.md section 2.
+# The frozen v1 tool surface from docs/PLAN.md section 2, extended by T12
+# with the deploy-anything tools (project_inspect, deploy_vcs,
+# app_healthcheck, deploy_any).
 PLAN_TOOLS = {
     "envs_list", "env_info", "env_stats", "env_create", "env_start",
     "env_stop", "env_sleep", "env_delete", "node_scale", "topology_change",
     "deploy_archive", "deploy_jps", "db_add", "logs_read", "env_var_get",
     "env_var_set", "ssl_letsencrypt", "marketplace_list", "templates_list",
     "quota_get", "op_result",
+    "project_inspect", "deploy_vcs", "app_healthcheck", "deploy_any",
 }
 
 MUTATING_MINIMAL = [
@@ -52,6 +55,10 @@ MUTATING_MINIMAL = [
                         "url": "https://example.com/app.war"}),
     ("deploy_jps", {"env_name": "mcp-test-x",
                     "jps": "https://example.com/manifest.jps"}),
+    ("deploy_vcs", {"env_name": "mcp-test-x",
+                    "git_url": "https://github.com/acme/demo"}),
+    ("deploy_any", {"env_name": "mcp-test-x",
+                    "source_url": "https://github.com/acme/demo"}),
     ("db_add", {"env_name": "mcp-test-x", "engine": "mysql"}),
     ("env_var_set", {"env_name": "mcp-test-x", "vars": {"A": "1"}}),
     ("ssl_letsencrypt", {"env_name": "mcp-test-x",

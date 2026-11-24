@@ -56,7 +56,39 @@ and verifies the result (e.g. curls the deployed app) before reporting.
   type the account password once and a confirmation passphrase equal to the
   environment name (the live API requires both).
 
-## 2. Connect your own agent via MCP (one command)
+## 2. Deploy anything - any language
+
+"Deploy my Rust app from https://github.com/me/my-app" just works - for ANY
+language. The assistant reads your project's manifests (package.json,
+Cargo.toml, mix.exs, go.mod, pom.xml, *.csproj, build.zig, CMakeLists.txt,
+Makefile, ...), proposes the detected stack as its first chip ("Rust 1.80
+(detected from Cargo.toml)"), and routes the deploy through a tiered table so
+an app in every language can start:
+
+| Tier | Languages | How it deploys |
+|---|---|---|
+| 1 - native stack | Node.js, Python, Java, PHP, Go, Ruby, .NET | straight onto the platform stack (git deploys stay connected to your repo) |
+| 2 - runtime image | Rust, Elixir, Zig, C/C++, Deno, Bun, Haskell, OCaml, Crystal, Dart, Swift, Nim, static sites | a docker node from the official runtime image (rust:1.80-slim, node:20, ...) - your code is fetched, built and started INSIDE the container, no image build needed |
+| 3 - your own image | any (Dockerfile / registry image) | a docker node from your image |
+| 4 - VPS bootstrap | exotic custom runtimes | a VPS node with a generated bootstrap script (install toolchain, build, run as a service) |
+
+Detected versions come from your manifests and toolchain files
+(`.python-version`, `rust-toolchain.toml`, `engines` in package.json, ...),
+and the app port follows framework conventions (express/fastify 3000,
+flask/django 8000/8080, spring 8080, rails 3000, phoenix 4000, actix/axum
+8080) - override it any time with the `PORT` env var. Your app must bind
+`0.0.0.0` (the wizard sets `PORT` and documents this).
+
+If the language cannot be inferred, the assistant asks **"Which runtime
+image should I use?"** - answer with your own registry image, or pick the
+VPS-node fallback. Every path reaches a deployable plan; nothing dead-ends.
+
+After every deploy the assistant verifies the result (waits for the nodes,
+curls the app URL, then checks the app actually started - status and page
+title), and offers a one-click auto-fix when it did not. The last step is
+always the security review card.
+
+## 3. Connect your own agent via MCP (one command)
 
 ```bash
 npx virtuozzo-am-mcp login --host https://<your-panel-host>
@@ -81,7 +113,7 @@ Same tool set in every mode: list/create/start/stop environments, deploy
 apps and marketplace JPS, add databases, scale, read logs, manage variables
 and SSL.
 
-## 3. Hosted assistant backend (self-hosting)
+## 4. Hosted assistant backend (self-hosting)
 
 Run the assistant itself on the platform (its own environment — the existing
 system stays untouched):

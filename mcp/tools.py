@@ -18,11 +18,14 @@ returns ``status: "in_progress"`` with the last observed state.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Tuple
+from urllib.parse import urljoin, urlsplit
 
-from . import security
+from . import deploy_templates, security
 from .jelastic_client import (
     AuthFailedError,
     DeleteInProgressError,
@@ -223,6 +226,11 @@ CONTEXT = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
            "maxLength": 64}
 STACK = {"type": "string", "pattern": r"^[a-z0-9][a-z0-9.:+_-]{0,31}$",
          "maxLength": 32}
+#: stack spec OR a user-supplied registry image (deploy-anything, tier 3):
+#: 'docker:registry.example.com/app:1.0' must fit.
+STACK_OR_IMAGE = {"type": "string",
+                  "pattern": r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,199}$",
+                  "maxLength": 200}
 VERSION = {"type": "string", "pattern": r"^[A-Za-z0-9.]{1,16}$",
            "maxLength": 16}
 TEXT = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$",
@@ -233,6 +241,26 @@ DOMAIN = {"type": "string", "maxLength": 253,
 ARCHIVE = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
            "maxLength": 128}
 STATUS = {"type": "string", "pattern": r"^[a-z_]{1,32}$", "maxLength": 32}
+SOURCE_URL = {"type": "string", "maxLength": 2048,
+              "description": "Public http(s) source URL: a git repository "
+                             "(https://github.com/org/repo[.git]) or a source "
+                             "archive (.zip/.tar.gz). SSH-style "
+                             "git@host:org/repo is accepted and normalized. "
+                             "SSRF-guarded: private targets are refused."}
+BRANCH = {"type": "string", "maxLength": 128,
+          "pattern": r"^[A-Za-z0-9._/-]{1,128}$",
+          "description": "Git branch (default: the repository's default "
+                         "branch)."}
+RUNTIME_IMAGE = {"type": "string", "maxLength": 256,
+                 "pattern": r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,255}$",
+                 "description": "Docker runtime image, e.g. 'rust:1.80-slim' "
+                                "or your own registry image. The special "
+                                "value 'vps' generates the Tier 4 VPS-node "
+                                "bootstrap instead of a container."}
+APP_PORT = {"type": "integer", "minimum": 1, "maximum": 65535,
+            "description": "App listen port (also exported as PORT; the app "
+                           "must bind 0.0.0.0). Default: the detected "
+                           "language/framework convention."}
 
 _CONFIRM_NOTE = ("Changes the platform state. Requires confirm=true after "
                  "explicit user confirmation.")
@@ -575,6 +603,281 @@ async def _h_op_result(client: JelasticClient, args: dict) -> dict:
             "observed": observed}
 
 
+# --- deployment source fetching (T12) ---------------------------------------
+
+
+async def http_fetch(url: str, *, timeout: float = 10.0,
+                     max_bytes: int = deploy_templates.MAX_SOURCE_BYTES
+                     ) -> dict:
+    """Single-hop HTTP GET seam (redirects are NEVER followed here).
+
+    Returns ``{status, headers, body, url, truncated}``. Callers re-validate
+    every redirect hop (SSRF: a public URL must not bounce the fetch onto a
+    private/metadata target). Monkeypatched in tests - nothing else in the
+    tool layer opens sockets.
+    """
+    return await _real_http_fetch(url, timeout=timeout, max_bytes=max_bytes)
+
+
+async def _real_http_fetch(url: str, *, timeout: float,
+                           max_bytes: int) -> dict:
+    import httpx
+
+    async with httpx.AsyncClient(follow_redirects=False,
+                                 timeout=timeout) as client:
+        async with client.stream("GET", url) as response:
+            declared = response.headers.get("content-length") or ""
+            truncated = declared.isdigit() and int(declared) > max_bytes
+            chunks: list = []
+            total = 0
+            if not truncated:
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        truncated = True
+                        break
+                    chunks.append(chunk)
+            return {"status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": b"".join(chunks) if not truncated else b"",
+                    "url": str(response.url), "truncated": truncated}
+
+
+async def _fetch_source(source_url: str) -> Tuple[dict, str]:
+    """Fetch a source archive with full redirect re-validation.
+
+    Git URLs map to their host's default-branch archive endpoint (the deploy
+    path clones inside the runtime container; inspection only needs the
+    manifests). Returns ``(detection, fetched_url)``.
+    """
+    is_git = deploy_templates.looks_like_git_url(source_url)
+    archive_url = source_url
+    if is_git:
+        derived = deploy_templates.git_archive_url(source_url)
+        if derived is None:
+            raise ToolInputError(
+                "a source archive cannot be derived from this git host - "
+                "pass an archive URL (zip/tar.gz) instead")
+        archive_url = derived
+    final = {"url": archive_url}
+    truncated = {"flag": False}
+
+    async def _hop(url: str):
+        result = await http_fetch(url)
+        final["url"] = str(result.get("url") or url)
+        truncated["flag"] = truncated["flag"] or bool(result.get("truncated"))
+        return (result.get("status") or 0, result.get("headers") or {},
+                result.get("body") or b"")
+
+    guard = security.SsrfGuard()
+    status, _headers, body = await guard.safe_fetch(_hop, archive_url)
+    if truncated["flag"]:
+        raise ToolInputError(
+            f"source exceeds the "
+            f"{deploy_templates.MAX_SOURCE_BYTES // (1024 * 1024)} MB cap")
+    if status >= 400:
+        raise OperationFailedError(
+            None, f"source fetch returned HTTP {status}",
+            {"url": archive_url})
+    if len(body) > deploy_templates.MAX_SOURCE_BYTES:
+        raise ToolInputError(
+            f"source exceeds the "
+            f"{deploy_templates.MAX_SOURCE_BYTES // (1024 * 1024)} MB cap")
+    try:
+        detection = deploy_templates.inspect_archive(body, archive_url)
+    except deploy_templates.SourceTooLargeError as exc:
+        raise ToolInputError(f"source archive too large: {exc}") from exc
+    except ValueError as exc:
+        raise ToolInputError(
+            f"source is not a recognized zip/tar archive: {exc}") from exc
+    detection["default_branch"] = (
+        deploy_templates.git_default_branch(final["url"]) if is_git else None)
+    return detection, final["url"]
+
+
+# --- deploy-anything handlers (T12) -----------------------------------------
+
+HEALTHCHECK_TIMEOUT = 10.0
+HEALTHCHECK_MAX_BYTES = 64 * 1024
+HEALTHCHECK_REDIRECTS = 3
+
+
+def _page_title(body: bytes) -> Optional[str]:
+    text = body.decode("utf-8", errors="replace")
+    match = re.search(r"<title[^>]*>(.*?)</title>", text,
+                      re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    title = " ".join(match.group(1).split())[:200]
+    return title or None
+
+
+async def _h_project_inspect(client: JelasticClient, args: dict) -> dict:
+    source_url = deploy_templates.normalize_git_url(_req_str(args, "source_url"))
+    security.validate_url(source_url)  # SSRF guard: public targets only
+    detection, fetched = await _fetch_source(source_url)
+    return {"source_url": source_url,
+            "source_kind": ("git"
+                            if deploy_templates.looks_like_git_url(source_url)
+                            else "archive"),
+            "archive_url": fetched,
+            "detected": detection.get("detected") or [],
+            "suggested_stack": detection.get("suggested_stack"),
+            "suggested_runtime_image": detection.get("suggested_runtime_image"),
+            "suggested_port": detection.get("suggested_port"),
+            "default_branch": detection.get("default_branch"),
+            "confidence": detection.get("confidence")}
+
+
+async def _h_deploy_vcs(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    git_url = deploy_templates.normalize_git_url(_req_str(args, "git_url"))
+    security.validate_url(git_url)  # SSRF guard
+    branch = _opt_str(args, "branch")
+    context = _opt_str(args, "context") or "ROOT"
+    await client.vcs_add_repo(env_name, git_url, branch=branch,
+                              context=context)
+    await client.vcs_deploy(env_name, context=context)
+    changes = await client.vcs_update(env_name, context=context)
+    return {"env_name": env_name, "git_url": git_url, "branch": branch,
+            "context": context,
+            "steps": ["addrepo", "deploy", "update"],
+            "changes": (changes or {}).get("changes"),
+            "detail": ("VCS repo registered, deployed and synced to the "
+                       "latest revision (asynchronous); verify with "
+                       "app_healthcheck")}
+
+
+async def _h_app_healthcheck(client: JelasticClient, args: dict) -> dict:
+    """Did it start? GET the app URL and classify the verdict.
+
+    Same-host redirects only (a redirect to another host is refused - the
+    goal is probing THIS environment's app), one 10 s fetch per hop.
+    """
+    env_name = _req_str(args, "env_name")
+    context = _opt_str(args, "context") or "ROOT"
+    info = await client.env_info(env_name)
+    env = info.get("env") or {}
+    domain = str(env.get("domain") or info.get("domain") or "").strip().lower()
+    path = "/" if context.upper() == "ROOT" else "/" + context.strip("/")
+    result = {"env_name": env_name, "context": context, "url": "",
+              "status": None, "title": None, "ok": False,
+              "error_class": None, "detail": ""}
+    if not domain:
+        result["error_class"] = "no_domain"
+        result["detail"] = "the environment has no bound domain"
+        return result
+    current = "http://" + domain + path
+    result["url"] = current
+    for _hop in range(HEALTHCHECK_REDIRECTS + 1):
+        security.validate_url(current)  # SSRF: never probe private targets
+        try:
+            response = await http_fetch(current, timeout=HEALTHCHECK_TIMEOUT,
+                                        max_bytes=HEALTHCHECK_MAX_BYTES)
+        except Exception as exc:  # fetch seam failures are data, not crashes
+            name = type(exc).__name__.lower()
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) \
+                    or "timeout" in name:
+                result["error_class"] = "timeout"
+                result["detail"] = "the app did not answer within 10 s"
+            else:
+                result["error_class"] = "unreachable"
+                result["detail"] = f"connection failed: {str(exc)[:120]}"
+            return result
+        status = int(response.get("status") or 0)
+        result["status"] = status
+        result["url"] = current
+        if 300 <= status < 400:
+            location = (response.get("headers") or {}).get("location") or \
+                (response.get("headers") or {}).get("Location")
+            if not location:
+                result["error_class"] = "redirect_blocked"
+                result["detail"] = "redirect without a Location target"
+                return result
+            target = urljoin(current, str(location))
+            if (urlsplit(target).hostname or "").lower() != domain:
+                result["error_class"] = "redirect_blocked"
+                result["detail"] = ("redirect left the environment host "
+                                    "(same-host redirects only)")
+                return result
+            current = target
+            continue
+        if status >= 400:
+            result["error_class"] = "http_error"
+            result["detail"] = f"the app answered HTTP {status}"
+            return result
+        result["ok"] = True
+        result["title"] = _page_title(response.get("body") or b"")
+        result["detail"] = "the app is up and answering"
+        return result
+    result["error_class"] = "redirect_blocked"
+    result["detail"] = "too many redirects"
+    return result
+
+
+async def _h_deploy_any(client: JelasticClient, args: dict) -> dict:
+    """Tier 2/3/4: generate the manifest and install it via the JPS path."""
+    env_name = _req_str(args, "env_name")
+    source_url = deploy_templates.normalize_git_url(_req_str(args, "source_url"))
+    security.validate_url(source_url)  # SSRF guard
+    runtime_image = _opt_str(args, "runtime_image")
+    port = _opt_int(args, "port")
+
+    language = None
+    detection = None
+    if runtime_image and runtime_image.lower() == "vps":
+        tier = 4
+        runtime_image = "vps"
+    else:
+        if runtime_image:
+            language = deploy_templates.image_language(runtime_image)
+        if language is None:
+            # No language from the image name: inspect the source for its
+            # toolchain files (best-effort; a bare registry image with an
+            # uninspectable source still deploys on the generic template).
+            try:
+                detection, _fetched = await _fetch_source(source_url)
+            except (ToolInputError, OperationFailedError,
+                    security.SecurityViolation):
+                detection = None
+            if detection:
+                language = ((detection.get("detected") or [{}]) or [{}])[
+                    0].get("type")
+        if not runtime_image:
+            runtime_image = (detection or {}).get("suggested_runtime_image")
+            if not runtime_image and language:
+                runtime_image = deploy_templates.runtime_image(language)
+            if not runtime_image:
+                raise ToolInputError(
+                    "no runtime image could be inferred for this source - "
+                    "pass [runtime_image] (for example your own registry "
+                    "image) or 'vps' for a VPS-node bootstrap")
+        tier = 2 if ((detection or {}).get("detected")
+                     or deploy_templates.image_language(runtime_image)) else 3
+    if port is None:
+        port = deploy_templates.language_port(language) \
+            if language else 8080
+    source = ({"git_url": source_url}
+              if deploy_templates.looks_like_git_url(source_url)
+              else {"archive_url": source_url})
+    if tier == 4:
+        manifest = deploy_templates.build_vps_manifest(
+            name=env_name, port=port, source=source, language=language)
+    else:
+        manifest = deploy_templates.build_runtime_manifest(
+            name=env_name, image=runtime_image, port=port, source=source,
+            language=language)
+    result = await client.install_jps(env_name, manifest,
+                                      skip_node_emails=True)
+    return {"env_name": env_name, "tier": tier,
+            "runtime_image": runtime_image, "language": language,
+            "port": port, "manifest": manifest, "jps": result,
+            "detail": (f"generated tier-{tier} manifest and installed it: "
+                       f"the app builds and starts inside "
+                       f"[{runtime_image}] on port {port} (asynchronous); "
+                       f"verify with app_healthcheck")}
+
+
 # --- registry ---------------------------------------------------------------
 
 TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
@@ -596,7 +899,7 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "cloudlet preset). " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "stack": {**STACK,
+            "stack": {**STACK_OR_IMAGE,
                       "description": "App stack: 'php:8.3', 'java:21', "
                                      "'nodejs:20', or 'docker:<image>[:<tag>]' "
                                      "(docker-centric platforms), e.g. "
@@ -699,6 +1002,54 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
             "settings": {"description": "Installation settings (object or "
                          "JSON string)."},
         }, ("env_name", "jps"), mutating=True), _h_deploy_jps),
+    ToolSpec(
+        "project_inspect",
+        "Detect what a source project is (language, version, evidence) from "
+        "its manifests/toolchain files - package.json, requirements.txt, "
+        "pom.xml, composer.json, Gemfile, go.mod, *.csproj, Cargo.toml, "
+        "mix.exs, build.zig, CMakeLists.txt, Makefile, Dockerfile, ... - and "
+        "suggest the stack, runtime image and app port. Accepts a git URL or "
+        "a zip/tar.gz archive URL; fetches in memory (SSRF-guarded, 25 MB "
+        "cap, nothing is executed).",
+        _schema({"source_url": SOURCE_URL}, ("source_url",),
+                mutating=False), _h_project_inspect),
+    ToolSpec(
+        "deploy_vcs",
+        "Deploy an application from a Git repository through the platform "
+        "VCS endpoints (addrepo + deploy + update = fetch recent changes). "
+        + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "git_url": SOURCE_URL,
+            "branch": BRANCH,
+            "context": {**CONTEXT, "description": "Deployment context "
+                        "path. Default 'ROOT'."},
+        }, ("env_name", "git_url"), mutating=True), _h_deploy_vcs),
+    ToolSpec(
+        "app_healthcheck",
+        "Verify the deployed application actually started: resolve the "
+        "environment domain and GET the app URL (same-host redirects only, "
+        "10 s per hop). Returns {status, title, ok, error_class} with "
+        "error_class one of: no_domain, unreachable, timeout, "
+        "redirect_blocked, http_error. Powers the deploy verify step and "
+        "auto-repair.",
+        _schema({"env_name": _ENV_NAME,
+                 "context": {**CONTEXT, "description": "Deployment "
+                             "context path probed (default 'ROOT' -> /)."}},
+                ("env_name",), mutating=False), _h_app_healthcheck),
+    ToolSpec(
+        "deploy_any",
+        "Deploy ANY application in ANY language: generate the tiered-deploy "
+        "JPS manifest (docker node from the official runtime image + fetch, "
+        "build and start cmd actions that build INSIDE the container - no "
+        "image build) and install it. With runtime_image='vps' generates the "
+        "Tier 4 VPS-node bootstrap instead. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "source_url": SOURCE_URL,
+            "runtime_image": RUNTIME_IMAGE,
+            "port": APP_PORT,
+        }, ("env_name", "source_url"), mutating=True), _h_deploy_any),
     ToolSpec(
         "db_add",
         "Add a database node group to an existing environment (engine, "

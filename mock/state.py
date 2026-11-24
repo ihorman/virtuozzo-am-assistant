@@ -159,6 +159,7 @@ class Env:
     env_vars: dict = field(default_factory=dict)
     logs: list = field(default_factory=list)
     app: Optional[dict] = None
+    vcs: Optional[dict] = None
     installations: list = field(default_factory=list)
     ssl: Optional[dict] = None
 
@@ -650,6 +651,64 @@ class MockJelastic:
         }
         self._log(env, f"deployed {fileUrl or fileName} to context {context}")
         return OK, {"domain": env.domain, "context": context}
+
+    # -- VCS deployment (environment/deployment/rest/*) ---------------------
+    # addrepo + deploy + update: the deploy-anything wizard's git path
+    # (update = fetch recent changes and redeploy).
+
+    def _vcs_ready(self, session, env_name, op):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}, None
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}, None
+        if env.status == "deleting" or env.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{env_name}] is being deleted"}, None
+        if env.status != "running":
+            return INVALID_PARAMETER, {
+                "error": f"environment [{env_name}] is not running"}, None
+        if not env.vcs and op != "addrepo":
+            return INVALID_PARAMETER, {
+                "error": f"no VCS project registered for [{env_name}]"}, None
+        return OK, {}, env
+
+    def addrepo(self, session, env_name, context=None, url=None, branch=None,
+                **_ignored):
+        code, err, env = self._vcs_ready(session, env_name, "addrepo")
+        if env is None:
+            return code, err
+        if not url:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [url] for method [AddRepo]"}
+        context = context or "ROOT"
+        env.vcs = {"url": str(url), "branch": branch or None,
+                   "context": context, "addedAt": self._now()}
+        self._log(env, f"VCS repo {url} registered on context {context}")
+        return OK, {"envName": env.name, "context": context, "url": str(url),
+                    "branch": branch or None}
+
+    def vcsdeploy(self, session, env_name, context=None, **_ignored):
+        code, err, env = self._vcs_ready(session, env_name, "deploy")
+        if env is None:
+            return code, err
+        context = context or "ROOT"
+        env.app = {"context": context, "fileUrl": (env.vcs or {}).get("url"),
+                   "fileName": None, "nodeGroup": "cp",
+                   "deployedAt": self._now()}
+        self._log(env, f"deployed VCS project to context {context}")
+        return OK, {"envName": env.name, "context": context,
+                    "domain": env.domain}
+
+    def vcsupdate(self, session, env_name, context=None, **_ignored):
+        code, err, env = self._vcs_ready(session, env_name, "update")
+        if env is None:
+            return code, err
+        context = context or "ROOT"
+        self._log(env, f"fetched recent VCS changes for context {context}")
+        return OK, {"envName": env.name, "context": context,
+                    "changes": 0, "domain": env.domain}
 
     def install_jps(self, session, jps, env_name=None, settings=None,
                     skip_node_emails=None):

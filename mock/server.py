@@ -17,7 +17,7 @@ import json
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .codes import INVALID_PARAMETER, OK
 from .state import MockJelastic
@@ -115,6 +115,19 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
                 p.get("session"), p.get("envName"), p.get("context"),
                 p.get("fileUrl"), p.get("fileName"), p.get("nodeGroup")))
 
+        # VCS deployment (deploy-anything wizard, git path): register the
+        # repo, deploy it, then fetch recent changes (update).
+        if method == "environment/deployment/rest/addrepo":
+            return _envelope(*st.addrepo(
+                p.get("session"), p.get("envName"), p.get("context"),
+                p.get("url"), p.get("branch")))
+        if method == "environment/deployment/rest/deploy":
+            return _envelope(*st.vcsdeploy(
+                p.get("session"), p.get("envName"), p.get("context")))
+        if method == "environment/deployment/rest/update":
+            return _envelope(*st.vcsupdate(
+                p.get("session"), p.get("envName"), p.get("context")))
+
         if method == "marketplace/jps/rest/install":
             return _envelope(*st.install_jps(
                 p.get("session"), p.get("jps"), p.get("envName"),
@@ -178,5 +191,26 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok", "service": "mock-jelastic"}
+
+    # Mock application endpoint for app_healthcheck: like a deployed app on
+    # the environment domain. Tests route the healthcheck fetch seam here.
+    @app.get("/site/{env_name}")
+    @app.get("/site/{env_name}/{path:path}")
+    async def mock_site(env_name: str, path: str = ""):
+        st: MockJelastic = app.state.jelastic
+        st.advance_all()
+        env = st.envs.get(env_name)
+        if env is None or env.removed:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if env.status != "running":
+            return JSONResponse({"error": "environment not running"},
+                                status_code=503)
+        if not env.app and not env.vcs:
+            return JSONResponse({"error": "no application deployed"},
+                                status_code=503)
+        title = f"{env_name} - deployed app"
+        body = (f"<html><head><title>{title}</title></head>"
+                f"<body><h1>{title}</h1></body></html>")
+        return HTMLResponse(body)
 
     return app
