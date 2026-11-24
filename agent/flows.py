@@ -118,6 +118,35 @@ def _parse_version(answer: str, engine: str) -> str:
     return found.group(0) if found else _ENGINE_VERSIONS.get(engine, "latest")
 
 
+#: friendly stack choices for the create-environment wizard
+_STACK_OPTIONS = ["PHP 8.3", "Node.js 20", "Java 21", "Python 3.12"]
+
+_STACK_TOKENS = (("php", "php:8.3"), ("node", "nodejs:20"),
+                 ("java", "java:21"), ("python", "python:3.12"))
+
+
+def _normalize_stack(answer: str) -> str:
+    lowered = (answer or "").strip().lower()
+    for key, token in _STACK_TOKENS:
+        if key in lowered:
+            return token
+    cleaned = re.sub(r"[^a-z0-9.:+_-]", "", lowered.replace(" ", ""))
+    return cleaned or "php:8.3"
+
+
+async def _env_known(ctx: FlowContext, env_name: str) -> bool:
+    """Existence check WITHOUT scary failure rows.
+
+    Probing env_info for a missing environment renders as a red "failed"
+    tool row and reads like a crash to users — but "does it exist yet?" is
+    normal wizard control flow. List the environments and look the name up
+    instead: one quiet success row, no error."""
+    listed = await ctx.run_tool("envs_list", {})
+    names = [str(e.get("envName")) for e in
+             ((listed.payload or {}).get("environments") or [])]
+    return env_name in names
+
+
 # --- error -> diagnose -> auto-fix ------------------------------------------
 
 async def handle_failure(ctx: FlowContext, outcome: ToolOutcome, *,
@@ -417,8 +446,7 @@ async def deploy_app(ctx: FlowContext) -> None:
     creating = False
     env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
     if env_name:
-        probe = await ctx.run_tool("env_info", {"env_name": env_name})
-        creating = not probe.ok
+        creating = not await _env_known(ctx, env_name)
     else:
         listed = await ctx.run_tool("envs_list", {})
         names = [str(e.get("envName")) for e in
@@ -561,16 +589,127 @@ async def deploy_app(ctx: FlowContext) -> None:
     await security_review(ctx, env_name, wait_for_fix=True)
 
 
+# --- flow: create environment -----------------------------------------------
+
+async def create_environment(ctx: FlowContext) -> None:
+    """Guided 'create an environment' wizard.
+
+    Philosophy (user feedback): MISSING INFORMATION IS NEVER AN ERROR — the
+    wizard asks one friendly question per unknown (name, type, size, SSL)
+    and only then executes."""
+    p = ctx.params
+
+    listed = await ctx.run_tool("envs_list", {})
+    existing = {str(e.get("envName")) for e in
+                ((listed.payload or {}).get("environments") or [])}
+
+    def _check_name(answer: str) -> Optional[str]:
+        name = answer.strip()
+        if not ENV_NAME_RE.match(name):
+            return ("Please use lowercase letters, digits and dashes "
+                    "(must start with a letter, max 30 characters).")
+        if name in existing:
+            return f"`{name}` is already taken — pick a different name."
+        return None
+
+    env_name = slugify_env_name(str(p.get("env_name") or "")) \
+        if p.get("env_name") else ""
+    if env_name and env_name in existing:
+        await ctx.say(f"`{env_name}` is already taken — let's pick another "
+                      "name.")
+        env_name = ""
+    if not env_name:
+        env_name = (await ctx.ask(
+            "What should the new environment be called?",
+            allow_free=True, validate=_check_name)).strip()
+
+    stack = _normalize_stack(str(p.get("stack") or "")) if p.get("stack") \
+        else _normalize_stack(await ctx.ask(
+            "What should run in this environment?",
+            _STACK_OPTIONS))
+
+    db = None
+    if p.get("db") is not None:
+        db = _normalize_db(str(p["db"])) if p["db"] else None
+    else:
+        db = _normalize_db(await ctx.ask(
+            "Would you like a database with it?",
+            ["No database", "MySQL 8.0", "MariaDB 10.11", "PostgreSQL 16",
+             "Redis 7.2"]))
+
+    cloudlets = _parse_cloudlets(str(p["cloudlets"])) if p.get("cloudlets") \
+        else _parse_cloudlets(await ctx.ask(
+            "How much power should it get?",
+            ["Dev - 4 cloudlets", "Prod - 12 cloudlets"]), default=8)
+
+    ssl_param = p.get("ssl")
+    ssl = _parse_ssl(ssl_param) if ssl_param is not None else \
+        _parse_ssl(await ctx.ask(
+            "Enable a free Let's Encrypt SSL certificate?",
+            ["Yes, enable SSL", "No, skip SSL"]))
+
+    db_part = f" + `{db}`" if db else ""
+    recap = (f"Create environment **{env_name}** with `{stack}`{db_part}, "
+             f"{cloudlets} cloudlets per node"
+             + (", free SSL on." if ssl else ", SSL off."))
+    approved = await ctx.confirm(recap, actions=["create environment"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    create_args = {"env_name": env_name, "stack": stack,
+                   "cloudlets": cloudlets}
+    if db:
+        create_args["db"] = db
+    out = await ctx.run_tool("env_create", create_args, confirmed=True,
+                             progress="Creating the environment")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=create_args,
+                                            retry_tool="env_create")
+        if out is None or not out.ok:
+            return
+        env_name = applied.get("env_name", env_name)
+
+    out = await ctx.run_tool("op_result", {
+        "env_name": env_name, "op": "status", "target": ["running"],
+        "timeout": 60}, progress="Waiting for the environment to start")
+    if not out.ok or out.payload.get("status") != "done":
+        await ctx.say("The environment is still starting up — ask me to "
+                      "check in a moment.")
+        return
+
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    domain = str((info.payload.get("env") or {}).get("domain") or "")
+    if ssl and domain:
+        out = await ctx.run_tool("ssl_letsencrypt", {
+            "env_name": env_name, "ext_domain": domain}, confirmed=True,
+            progress="Issuing a free SSL certificate")
+        if not out.ok:
+            await ctx.say("The SSL certificate could not be issued right "
+                          "now — the environment itself is up.")
+
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Stack: `{stack}`" + (f" + `{db}`" if db else "") + "\n"
+            f"- Resources: {cloudlets} cloudlets per node\n"
+            f"- URL: `{domain or 'pending'}`\n\n"
+            f"_Next: deploy an application to it — just say the word._")
+    await ctx.card(
+        "success", "Environment is up 🎉", body,
+        [{"label": "Open dashboard ↗",
+          "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+          "payload": {}}])
+
+
 # --- flow 2: add database ---------------------------------------------------
 
 async def db_add(ctx: FlowContext) -> None:
     p = ctx.params
 
     env_name = slugify_env_name(str(p.get("env_name") or "")) if p.get("env_name") else ""
-    if env_name:
-        probe = await ctx.run_tool("env_info", {"env_name": env_name})
-        if not probe.ok:
-            env_name = ""   # unknown target — fall through to the picker
+    if env_name and not await _env_known(ctx, env_name):
+        await ctx.say(f"I couldn't find an environment named `{env_name}` — "
+                      "let's pick one from your list.")
+        env_name = ""   # unknown target — fall through to the picker
     if not env_name:
         listed = await ctx.run_tool("envs_list", {})
         names = [str(e.get("envName")) for e in
@@ -808,6 +947,7 @@ async def troubleshoot(ctx: FlowContext) -> None:
 
 FLOWS = {
     "deploy_app": deploy_app,
+    "env_create": create_environment,
     "db_add": db_add,
     "scale": scale,
     "troubleshoot": troubleshoot,

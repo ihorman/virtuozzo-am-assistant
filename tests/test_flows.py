@@ -433,6 +433,51 @@ def test_db_add_wizard_end_to_end(app, state):
     assert events[-1][0] == "done"
 
 
+# --- flow: create environment ----------------------------------------------
+
+def test_env_create_wizard_asks_instead_of_erroring(app, state):
+    """User feedback: 'create env named test' must ASK guiding questions
+    (type, database, size, SSL) — never show a failure row for missing
+    information, and never route into the wrong wizard."""
+    token = make_env(state, "other")
+    llm = FakeLLM(
+        llm_flow("env_create", {"env_name": "test"},
+                 "Let's set it up!"),
+        FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+
+    events = run(drive_chat(
+        agent_app, "conv-env-create",
+        "I want to create environment with a name 'test'",
+        [{"kind": "ask", "answer": "Node.js 20"},
+         {"kind": "ask", "answer": "No database"},
+         {"kind": "ask", "answer": "Dev - 4 cloudlets"},
+         {"kind": "ask", "answer": "No, skip SSL"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 4
+    assert any("What should run" in a["question"] for a in asks)
+    assert any("Node.js 20" in (a.get("options") or []) for a in asks)
+
+    # missing information produced questions, not failures
+    failed = [p for name, p in events
+              if name == "tool_result" and p.get("ok") is False]
+    assert not failed, f"no tool may fail during wizard discovery: {failed}"
+
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1 and "test" in confirms[0]["summary"]
+
+    creates = tool_calls(events, "env_create")
+    assert creates and creates[0]["args"]["env_name"] == "test"
+    assert creates[0]["args"]["stack"] == "nodejs:20"
+    assert "test" in state.envs
+    assert cards(events, "success")
+    assert events[-1][0] == "done"
+
+
 # --- flow 3: scale -----------------------------------------------------------
 
 def test_scale_flow_end_to_end(app, state):
