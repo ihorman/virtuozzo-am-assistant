@@ -70,24 +70,14 @@
     });
   }
 
-  /** Continue the dashboard's background seamlessly (DESIGN.md): the panel
-   *  adopts the sampled page background and flips its tokens for light pages.
-   *  Applied to BOTH <html> and <body> so overscroll/edges match too. */
-  function applyTheme(theme) {
-    if (!theme || !theme.color) return;
-    try {
-      for (const el of [document.documentElement, document.body]) {
-        el.style.backgroundColor = theme.color;
-        el.style.backgroundImage = theme.image || "none";
-      }
-      document.body.classList.toggle("light", Boolean(theme.light));
-    } catch (_err) {
-      /* keep design-system defaults */
-    }
-  }
+  /** Background matching is DELIBERATELY STATIC (user decision, 2026-11-24):
+   *  the panel paints the platform palette (#252D37, --bg) exactly and never
+   *  re-colors itself at runtime — runtime sampling kept picking dashboard
+   *  loading overlays and flipping the panel to the wrong shade. The sampled
+   *  theme stays in the context payload, reserved for future per-stand
+   *  theming behind an explicit option. */
 
   function applyContext(context) {
-    if (context.theme) applyTheme(context.theme);
     if (context.envName) {
       el.envPill.hidden = false;
       el.envName.textContent = context.envName;
