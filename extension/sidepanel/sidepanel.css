@@ -3,7 +3,7 @@
  * Works at 360px width without horizontal scroll. */
 
 :root {
-  --bg: #0B1220;
+  --bg: #252D37; /* exact VHC dashboard content background (user-verified) */
   --surface: rgba(255, 255, 255, 0.05);
   --surface-2: rgba(255, 255, 255, 0.09);
   --border: rgba(255, 255, 255, 0.10);
@@ -52,7 +52,8 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  background-image: radial-gradient(1200px 400px at 80% -10%, rgba(59, 130, 246, 0.14), transparent);
+  /* flat — any decorative tint here would break the seamless continuation
+   * of the dashboard background */
   color: var(--text);
   font: 400 14px/1.5 var(--font-ui);
   -webkit-font-smoothing: antialiased;

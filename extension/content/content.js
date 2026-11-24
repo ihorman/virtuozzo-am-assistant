@@ -74,11 +74,13 @@
           stack = document.elementsFromPoint(x, y);
         }
         stack = stack.concat([document.body, document.documentElement]);
-        /* The page background is the TOPMOST FULL-BLEED painted layer:
-         * cards/headers are painted too but never cover >=80% of the
-         * viewport, so they are skipped; wrapper-div backgrounds (the
-         * Jelastic/VHC case) are found because they do cover it. */
-        for (const el of stack) {
+        /* The page background is the OUTERMOST (bottom-most) full-bleed
+         * painted layer: cards/headers are painted too but never cover
+         * >=80% of the viewport (skipped), wrapper-div backgrounds (the
+         * Jelastic/VHC case) are found, and loading-splash overlays ABOVE
+         * the real background are deliberately skipped. */
+        for (let i = stack.length - 1; i >= 0; i--) {
+          const el = stack[i];
           if (!el || el.nodeType !== 1) continue;
           const cs = getComputedStyle(el);
           const bg = cs.backgroundColor;
