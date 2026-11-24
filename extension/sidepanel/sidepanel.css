@@ -13,7 +13,7 @@
   --ok: #16A34A;
   --warn: #F97316;
   --text: #E6EDF7;
-  --muted: #8B9BB4;
+  --muted: #A7B4C8; /* readable on #252D37 (contrast fixed per user feedback) */
   --radius: 14px;
   --radius-sm: 10px;
   --gutter: 16px; /* single horizontal gutter: every row aligns to it */
@@ -71,6 +71,7 @@ body {
   backdrop-filter: blur(16px);
   background: var(--surface);
   flex: 0 0 auto;
+  line-height: 1; /* one baseline: pill, host label and icons align */
 }
 
 .env-pill {
@@ -110,6 +111,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1;
 }
 
 .spacer { flex: 1 1 auto; }
@@ -190,7 +192,9 @@ body {
 .chip {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+  min-height: 40px; /* uniform chip rows */
   padding: 8px 14px;
   border-radius: 999px;
   border: 1px solid var(--border);
