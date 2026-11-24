@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Marker for the VAP Copilot content script (offline dev + smoke tests). -->
+  <meta name="vap-dashboard" content="1">
+  <title>Virtuozzo Application Manager — Dashboard (mock)</title>
+  <style>
+    :root {
+      --bg: #0E1626;
+      --panel: #16223A;
+      --border: rgba(255, 255, 255, 0.09);
+      --text: #E6EDF7;
+      --muted: #8B9BB4;
+      --blue: #3B82F6;
+      --green: #16A34A;
+      --orange: #F97316;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 400 14px/1.5 Inter, system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    header .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+    header .logo .mark {
+      width: 28px; height: 28px; border-radius: 7px;
+      background: linear-gradient(135deg, #234F95, #3B82F6);
+    }
+    header nav { display: flex; gap: 18px; color: var(--muted); font-size: 13px; }
+    header nav .active { color: var(--text); font-weight: 600; }
+    main { padding: 24px; max-width: 1080px; }
+    h1 { font-size: 18px; margin-bottom: 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+    .envs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 14px;
+    }
+    .env {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .env .row1 { display: flex; align-items: center; justify-content: space-between; }
+    .env .name { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 14px; }
+    .status {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11.5px; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px;
+    }
+    .status .dot { width: 7px; height: 7px; border-radius: 50%; }
+    .status.running { background: rgba(22,163,74,.14); color: var(--green); }
+    .status.running .dot { background: var(--green); }
+    .status.sleeping { background: rgba(249,115,22,.14); color: var(--orange); }
+    .status.sleeping .dot { background: var(--orange); }
+    .status.stopped { background: rgba(139,155,180,.14); color: var(--muted); }
+    .status.stopped .dot { background: var(--muted); }
+    .env .meta { color: var(--muted); font-size: 12px; margin: 10px 0; }
+    .env .actions { display: flex; gap: 8px; }
+    .env button {
+      padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: rgba(255,255,255,.05); color: var(--text); font-size: 12px; cursor: pointer;
+    }
+    .env button.primary { background: var(--blue); border-color: transparent; color: #fff; }
+    .toolbar { display: flex; gap: 10px; margin-bottom: 18px; }
+    .toolbar button {
+      padding: 9px 16px; border-radius: 9px; border: 1px solid var(--border);
+      background: rgba(255,255,255,.05); color: var(--text); font-size: 13px; cursor: pointer;
+    }
+    .toolbar button.primary { background: var(--blue); border-color: transparent; color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo"><div class="mark"></div> Virtuozzo Application Manager</div>
+    <nav>
+      <span class="active">Environments</span>
+      <span>Marketplace</span>
+      <span>Billing</span>
+      <span>Support</span>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Environments</h1>
+    <div class="sub">Mock dashboard for VAP Copilot development — no platform required.</div>
+
+    <div class="toolbar">
+      <button class="primary">+ New environment</button>
+      <button>Import</button>
+    </div>
+
+    <div class="envs">
+      <div class="env" data-env-name="my-demo-env" id="jelastic-dashboard">
+        <div class="row1">
+          <span class="name" id="env-name">my-demo-env</span>
+          <span class="status running"><span class="dot"></span>running</span>
+        </div>
+        <div class="meta">Node.js 20 · PostgreSQL 16 · 4 cloudlets · Frankfurt</div>
+        <div class="actions">
+          <button class="primary">Open in browser</button>
+          <button>Settings</button>
+          <button>Clone</button>
+          <button>Stop</button>
+        </div>
+      </div>
+      <div class="env" data-env-name="staging-php">
+        <div class="row1">
+          <span class="name">staging-php</span>
+          <span class="status sleeping"><span class="dot"></span>sleeping</span>
+        </div>
+        <div class="meta">PHP 8.3 · MariaDB · 2 cloudlets · Warsaw</div>
+        <div class="actions">
+          <button class="primary">Open in browser</button>
+          <button>Settings</button>
+          <button>Clone</button>
+          <button>Start</button>
+        </div>
+      </div>
+      <div class="env" data-env-name="old-tests">
+        <div class="row1">
+          <span class="name">old-tests</span>
+          <span class="status stopped"><span class="dot"></span>stopped</span>
+        </div>
+        <div class="meta">Java 17 · 3 cloudlets · Frankfurt</div>
+        <div class="actions">
+          <button>Settings</button>
+          <button>Clone</button>
+          <button>Start</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    /* Jelastic dashboard marker stub (content-script detection). */
+    window.jelastic = window.jelastic || { mock: true };
+    /* Deep link: dashboard.html?env=my-demo-env sets the focused env. */
+    const env = new URLSearchParams(location.search).get("env");
+    if (env) {
+      const card = [...document.querySelectorAll(".env")]
+        .find((node) => node.dataset.envName === env);
+      if (card) card.style.borderColor = "rgba(59, 130, 246, 0.6)";
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+/* Content-script page-level styles. The FAB itself is styled inside its
+ * shadow root (content.js); this file only hides page leftovers if a host
+ * page ships its own "AI Assistant" affordance we replace. */
+#vap-copilot-fab-root {
+  all: initial;
+}

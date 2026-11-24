@@ -54,6 +54,14 @@ Responses use the real envelope: `{"result": 0, ...}` on success,
 Mock-defined result codes (no verified real-stand equivalent): `2024`
 environment not found, `2025` node not found, `2026` invalid parameter.
 
+## Mock dashboard page
+
+`dashboard.html` is a static, offline Jelastic-style dashboard for extension
+development and smoke tests (marker `<meta name="vap-dashboard">`). Serve it
+with `python3 -m http.server 8788 --directory mock` and open
+`http://127.0.0.1:8788/dashboard.html?env=my-demo-env` — the VAP Copilot FAB
+appears and captures the env context. See `extension/README.md`.
+
 ## Test support
 
 `MockJelastic.expire_sessions()` forces session expiry;

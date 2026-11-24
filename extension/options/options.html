@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VAP Copilot — Settings</title>
+  <link rel="stylesheet" href="../fonts/fonts.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="wrap">
+    <header class="head">
+      <img src="../icons/icon-48.png" alt="" width="40" height="40">
+      <div>
+        <h1>VAP Copilot Settings</h1>
+        <p class="muted">Escape hatch only — the assistant works without any configuration.</p>
+      </div>
+    </header>
+
+    <section class="panel">
+      <h2>Connection</h2>
+      <label class="field">
+        <span class="label">Agent URL</span>
+        <input id="agent-url" type="url" spellcheck="false"
+               placeholder="https://hermes.bannoe.it/am-assistant">
+        <span class="hint">The chat backend that powers the assistant.</span>
+      </label>
+      <label class="field">
+        <span class="label">Platform host (dashboard)</span>
+        <input id="panel-host" type="url" spellcheck="false"
+               placeholder="auto-detect">
+        <span class="hint">Where the FAB appears and where the session is captured.
+          Leave empty for auto-detect.</span>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Platform session</h2>
+      <p class="muted" id="session-status">Checking…</p>
+      <div class="row">
+        <button class="btn" id="btn-detect">Detect from dashboard</button>
+      </div>
+      <label class="field">
+        <span class="label">Paste session token (fallback)</span>
+        <input id="session-token" type="password" spellcheck="false"
+               placeholder="session token from the dashboard">
+        <span class="hint">Used only when automatic capture fails. Stored locally in
+          the browser, never synced.</span>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Diagnostics</h2>
+      <div class="row">
+        <button class="btn" id="btn-health">Test connection</button>
+      </div>
+      <pre class="diagnostics" id="diagnostics">Not tested yet.</pre>
+    </section>
+
+    <footer class="row actions">
+      <button class="btn primary" id="btn-save">Save</button>
+      <button class="btn ghost" id="btn-reset">Reset to defaults</button>
+      <span class="save-note" id="save-note" hidden>Saved ✓</span>
+    </footer>
+  </main>
+
+  <script src="../lib/api.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
