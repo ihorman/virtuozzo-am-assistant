@@ -22,9 +22,10 @@ permissions, from three surfaces:
    `dist/virtuozzo-am-assistant-extension-v<version>.zip`).
 2. Open `chrome://extensions`, enable **Developer mode**.
 3. **Load unpacked** -> pick the `extension/` directory (or unzip the release).
-4. Open the extension **Options** and set your assistant endpoint URL
-   (e.g. `https://assistant.example.com`). Defaults work for a local dev
-   backend at `http://127.0.0.1:8787`.
+4. (Optional) Open the extension **Options** to change the assistant endpoint
+   URL. The default is the hosted assistant
+   (`https://hermes.bannoe.it/am-assistant`); for offline development point it
+   at your local backend (e.g. `http://127.0.0.1:8787`).
 
 ### Use
 
@@ -51,8 +52,9 @@ and verifies the result (e.g. curls the deployed app) before reporting.
 - The assistant only ever acts **with your own platform permissions** — it
   passes your dashboard session to the API; it never stores your password.
 - Every change requires an explicit **Confirm** in the chat.
-- Deleting an environment additionally asks you to type the account password
-  once (the API requires it) and is double-confirmed.
+- Deleting an environment is double-confirmed and additionally asks you to
+  type the account password once and a confirmation passphrase equal to the
+  environment name (the live API requires both).
 
 ## 2. Connect your own agent via MCP (one command)
 

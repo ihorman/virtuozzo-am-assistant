@@ -17,7 +17,8 @@ surfaces in one repo:
 User guide: [docs/USAGE.md](docs/USAGE.md) ·
 Plan: [docs/PLAN.md](docs/PLAN.md) ·
 Extension ↔ agent contract: [docs/API-CONTRACT.md](docs/API-CONTRACT.md) ·
-Threat model: [docs/SECURITY.md](docs/SECURITY.md)
+Threat model: [docs/SECURITY.md](docs/SECURITY.md) ·
+Status report: [docs/MORNING-REPORT-2026-11-24.md](docs/MORNING-REPORT-2026-11-24.md)
 
 ## Architecture
 
@@ -61,7 +62,10 @@ per call and never echoed or logged). Expired sessions surface as a clear
 - Read tools are free; **every mutating tool requires `confirm: true`**
   (the strict JSON boolean) in its arguments — refused with `confirm_required`
   otherwise, before any platform call.
-- `env_delete` additionally requires the account `password` argument.
+- `env_delete` additionally requires the account `password` **and** a typed
+  `passphrase` equal to the environment name (the live API refuses deletion
+  with result 724 otherwise). The password/passphrase are forwarded once per
+  call and never echoed or logged.
 - Jelastic operations are fire-and-forget: `op_result` polls observable
   state; a timeout returns `status: "in_progress"`, never a false failure.
 - The tool surface is closed (no fetch/exec/file tools) — see
@@ -335,11 +339,41 @@ Loads into `chrome://extensions` (Developer mode → Load unpacked / pack).
 HTTP mode reads credentials per request from `X-Jelastic-Host` /
 `X-Jelastic-Session` instead of the `JELASTIC_*` env vars (no cross-fallback).
 
+## Status & verification (2026-11-24)
+
+The full report with the verified/unverified split is
+[docs/MORNING-REPORT-2026-11-24.md](docs/MORNING-REPORT-2026-11-24.md). Summary:
+
+**Verified**
+- Unit/integration suite: 237 tests, network-free, green (re-run 2026-11-24).
+- Extension: headless-Chromium smoke against the mock agent + mock dashboard
+  (FAB renders, full chat roundtrip incl. confirm gate and success card);
+  19-state DESIGN.md screenshot set reviewed.
+- Live e2e on a real stand (`app.vhc.virtuozzo.com`, VHC 8.15.1):
+  `scripts/e2e_demo.sh` — **12 ok / 0 failed** (create env → deploy sample app
+  → HTTP 200 → add DB node → vertical scale → read logs → live agent-chat turn
+  over SSE → explicit deletion listing → delete → confirmed gone).
+- Live REST shapes captured in
+  [docs/live-api-notes.md](docs/live-api-notes.md) ("Live e2e-verified
+  shapes").
+
+**Not yet verified / open**
+- MCP tool layer against live VHC: known method-name/shape mismatches
+  (`getenvstat`, `getenvvariables`, deploy `url`, `deleteenv` passphrase) are
+  being fixed in a follow-up pass; the mock + unit tests cover the contract,
+  live coverage so far is the e2e harness and the agent chat.
+- Stand auth for the demo stands: works with a browser session token
+  (expires); SSO/password login flow not yet exercised end-to-end against the
+  stand.
+- LLM key for the demo agent deployment (env `VAP_LLM_API_KEY`) — to be
+  provisioned by the operator at deploy time.
+
 ## Testing policy
 
-- `pytest` is fully network-free (in-process mock + socket guard).
+- `pytest` is fully network-free (in-process mock + socket guard); 237 tests.
 - **Live tests never touch existing systems**: they use throwaway
   `mcp-test-*` environments that are explicitly listed and deleted
-  afterwards (`scripts/e2e_demo.sh`).
+  afterwards (`scripts/e2e_demo.sh`; deletion is confined to the
+  `^mcp-test-` prefix and needs `passphrase=<envName>`).
 - LLM endpoints are env-configured; nothing paid is called without a
   deployment-time key and explicit operator intent.

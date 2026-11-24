@@ -1,8 +1,11 @@
-# Live platform API notes (verified 2026-11-23 against VHC 8.15.1)
+# Live platform API notes (verified 2026-11-23/24 against VHC 8.15.1)
 
-Verified facts from live probing of a VHC/Jelastic-family panel. Account
-identifiers are redacted. These shapes are what `mcp/jelastic_client.py` and
-the mock must honor.
+Verified facts from live probing of a VHC/Jelastic-family panel
+(`app.vhc.virtuozzo.com`), plus the full end-to-end run of
+`scripts/e2e_demo.sh` on 2026-11-24 (12 ok / 0 failed). Account identifiers
+are redacted. These shapes are what `mcp/jelastic_client.py` and the mock must
+honor. The section "Live e2e-verified shapes" at the bottom is the
+authoritative write-up of the e2e findings.
 
 ## Auth
 
@@ -90,3 +93,93 @@ Client rule: accept BOTH shapes — read `d.get("info", d)` before indexing
   post-login platform session), not REST password signin.
 - The mock should emulate both `getenvs` (nested) and `getenvinfo` (flat +
   nested fallback) shapes and the result codes above.
+
+## Live e2e-verified shapes (2026-11-24, `scripts/e2e_demo.sh`, VHC 8.15.1)
+
+Verified by a full clean end-to-end run (create → deploy → DB node → scale →
+logs → agent chat → delete, 12 ok / 0 failed). This is the authoritative spec
+for the tool layer's live compatibility.
+
+### Request encoding
+
+- **Form-encoded POST only.** A JSON request body yields
+  `invalid parameter [session]`. Nested objects (`env`, `nodes`, `vars`,
+  `data`) go in form fields as **JSON strings** (e.g. `nodes=[{...}]`).
+
+### Environment lifecycle
+
+- **createenvironment** works with native stacks:
+  `env={"shortdomain": <name>}` +
+  `nodes=[{"nodeType":"nginxphp-dockerized","nodeGroup":"cp","count":1,"fixedCloudlets":1,"flexibleCloudlets":3}]`.
+  Real `nodeType` values from `gettemplates`: `nginxphp-dockerized`, `lemp`,
+  `tomcat`, `nodejs`, `mysql`, `mariadb-dockerized`, `postgresql`, `redis`,
+  `mongodb-dockerized`, `docker`, … Env domain: `<env>.eu1.paas.virtuozzo.cloud`.
+- **deleteenv** requires `passphrase=<envName>` (typed confirmation) **plus**
+  the account password. Without the passphrase: result **724**
+  ("Confirmation failed"); the account password alone is not enough.
+  A ghost/nonexistent env returns result **11** (not 2024).
+- Deleting is fire-and-forget; "confirmed gone" = a later lookup returns 11.
+
+### Deployment
+
+- **deployarchive** wants `fileUrl` + `fileName` (NOT `url`/`archive`);
+  extra params are tolerated. Verified sample:
+  `fileUrl=https://codeload.github.com/octocat/Spoon-Knife/zip/refs/heads/main`,
+  `fileName=app.zip` — deployed and HTTP 200 served.
+- Only **jem-capable stacks** accept `deployarchive` (e.g.
+  `nginxphp-dockerized` ✅). Plain Docker containers (e.g. `nginx:alpine`)
+  fail result **4099** `jem: not found` — no deploy agent inside.
+
+### Topology & scaling
+
+- **changetopology** requires an env descriptor + nodes JSON:
+  `env={"region":"","sslstate":false}` + `nodes=[...]`, form-encoded. A plain
+  `envName` gives `invalid parameter [env]`. Adding
+  `{"nodeType":"mariadb-dockerized","nodeGroup":"db",...}` works. The
+  dashboard SPA posts the same body to
+  `/JElastic/env/control/rest/changetopology`; the `/1.0/environment/control/rest/`
+  base accepts it too.
+- **applynodegroupdata** scales an **existing** group:
+  `nodeGroup=<name>` + `data={"count":..,"fixedCloudlets":..,"flexibleCloudlets":..}`.
+- **editnodegroup** fails with **1102** ("Invalid nodeGroup data") when adding
+  nodes — the dashboard uses `changetopology` for adds. Do the same.
+
+### Read surface
+
+- **getsumstat** works; **getenvstat** 404s on VHC. Do not use it.
+- **getenvinfo** returns flat top-level `env`/`nodes`/`nodeGroups`,
+  `status: 1` = running (numeric), **no `statusName`** field.
+- **Logs**: `getlogs` requires `nodeId` and returns a keyword/file listing;
+  log **content** comes from **readlog** `path=/var/log/...&line=N` →
+  `{"linescount": N, "body": "..."}`. `getlogslist` lists log directories.
+
+### Environment variables
+
+- `getenvvariables`/`setenvvariables` **do not exist** on VHC. Use:
+  - read: `getcontainerenvvars(nodeId)` or `getcontainerenvvarsbygroup(nodeGroup)` (GET) → `{"object": {"vars": {...}}}`
+  - write: `setcontainerenvvarsbygroup` with form `data={"vars":{...}}`, or
+    `addcontainerenvvars` with `vars={"K":"V"}` (both verified `result: 0`).
+
+### Result codes observed live
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 3 | invalid parameter |
+| 11 | environment not found (ghost env) |
+| 705 | no rights |
+| 724 | deleteenv confirmation failed (missing `passphrase=<envName>`) |
+| 1102 | invalid nodeGroup data (`editnodegroup` add) |
+| 2002 | (observed on failed ops) |
+| 2314 | domain already taken |
+| 2391 | (observed) |
+| 4099 | deploy failed (`jem: not found` — non-jem Docker container) |
+
+### Client rules (live-compat)
+
+1. Always POST form-encoded; nested values as JSON strings in form fields.
+2. Walk nested `response` error chains: an outer `result: 0` may carry
+   `{response: {result: 3, ...}}` — the innermost non-zero result is the
+   real error.
+3. Omit `region` unless the caller sets it explicitly — VHC rejects
+   `"default"`.
