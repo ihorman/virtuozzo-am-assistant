@@ -84,6 +84,13 @@ class MalformedResponseError(JelasticError):
     """Response was not the expected {result: ...} envelope (WAF page, proxy)."""
 
 
+class RedirectBlockedError(JelasticError):
+    """The platform answered with a redirect — refused.
+
+    Redirects are never followed: the session token must not leave the
+    pinned platform origin (docs/SECURITY.md T2)."""
+
+
 class OperationTimeout(Exception):
     """A polling deadline or HTTP timeout elapsed.
 
@@ -139,6 +146,7 @@ class JelasticClient:
             base_url=f"{host}/1.0/",
             timeout=timeout,
             transport=transport,
+            follow_redirects=False,  # token pinning: never leave self.host
         )
 
     # -- lifecycle ----------------------------------------------------------
@@ -197,6 +205,14 @@ class JelasticClient:
             raise OperationTimeout(
                 f"HTTP request to {path} timed out; the operation may still "
                 f"be running on the platform") from exc
+        if 300 <= response.status_code < 400:
+            # Token pinning: a redirect would move the session token to
+            # another origin. Refuse and surface it plainly.
+            raise RedirectBlockedError(
+                None,
+                f"the platform answered HTTP {response.status_code} with a "
+                f"redirect; redirects are refused so the session token "
+                f"cannot leave the platform origin")
         try:
             body = response.json()
         except ValueError as exc:

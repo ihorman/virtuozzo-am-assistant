@@ -43,6 +43,17 @@ def _no_real_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", guarded)
 
 
+@pytest.fixture(autouse=True)
+def _stub_dns(monkeypatch):
+    """No real DNS in tests: the SSRF guard's resolver seam is stubbed to a
+    stable public address. Security tests override the seam per-case to
+    simulate private/metadata resolutions."""
+    import mcp.security as security
+
+    monkeypatch.setattr(security, "resolve_host_ips",
+                        lambda host: ["93.184.216.34"])
+
+
 @pytest.fixture
 def state() -> MockJelastic:
     return MockJelastic(MockConfig(transition_seconds=TRANSITION))

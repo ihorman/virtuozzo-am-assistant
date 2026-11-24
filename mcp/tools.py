@@ -22,6 +22,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Tuple
 
+from . import security
 from .jelastic_client import (
     AuthFailedError,
     DeleteInProgressError,
@@ -35,6 +36,7 @@ from .jelastic_client import (
     NodeNotFoundError,
     OperationFailedError,
     OperationTimeout,
+    RedirectBlockedError,
     SessionExpiredError,
 )
 
@@ -183,7 +185,28 @@ def _schema(properties: dict, required=(), *, mutating: bool) -> dict:
 _ENV_NAME = {
     "type": "string",
     "description": "Environment name (its subdomain label, e.g. 'my-app').",
+    "pattern": r"^[a-z0-9][a-z0-9-]{2,32}$",
+    "maxLength": 32,
 }
+
+# Anchored validation patterns (docs/SECURITY.md mitigation 4).
+NODE_GROUP = {"type": "string", "pattern": r"^[a-z0-9][a-z0-9-]{0,15}$",
+              "maxLength": 16}
+CONTEXT = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+           "maxLength": 64}
+STACK = {"type": "string", "pattern": r"^[a-z0-9][a-z0-9.:+_-]{0,31}$",
+         "maxLength": 32}
+VERSION = {"type": "string", "pattern": r"^[A-Za-z0-9.]{1,16}$",
+           "maxLength": 16}
+TEXT = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$",
+        "maxLength": 64}
+DOMAIN = {"type": "string", "maxLength": 253,
+          "pattern": r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                     r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"}
+ARCHIVE = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+           "maxLength": 128}
+STATUS = {"type": "string", "pattern": r"^[a-z_]{1,32}$", "maxLength": 32}
+
 _CONFIRM_NOTE = ("Changes the platform state. Requires confirm=true after "
                  "explicit user confirmation.")
 
@@ -267,15 +290,31 @@ async def _h_deploy_archive(client: JelasticClient, args: dict) -> dict:
     archive = _opt_str(args, "archive")
     if bool(url) == bool(archive):
         raise ToolInputError("exactly one of [url] or [archive] is required")
+    if url:
+        security.validate_url(url)  # SSRF guard: refuse private/metadata targets
     return await client.deploy_archive(
         env_name, context=_opt_str(args, "context") or "ROOT",
         url=url, archive=archive, node_group=_opt_str(args, "node_group"))
 
 
+def _frame_platform_text(value: Any) -> Any:
+    """Frame platform-returned text fields as untrusted data (T4)."""
+    if isinstance(value, str):
+        return security.frame_untrusted(value)
+    return value
+
+
 async def _h_deploy_jps(client: JelasticClient, args: dict) -> dict:
-    return await client.install_jps(
-        _req_str(args, "env_name"), _req_str(args, "jps"),
+    jps = _req_str(args, "jps")
+    if security.looks_like_url(jps):
+        security.validate_url(jps)  # SSRF guard on manifest URLs
+    result = await client.install_jps(
+        _req_str(args, "env_name"), jps,
         settings=args.get("settings"), skip_node_emails=True)
+    for field in ("successText", "message", "text"):
+        if isinstance(result.get(field), str):
+            result[field] = _frame_platform_text(result[field])
+    return result
 
 
 async def _h_db_add(client: JelasticClient, args: dict) -> dict:
@@ -318,7 +357,15 @@ async def _h_db_add(client: JelasticClient, args: dict) -> dict:
 async def _h_logs_read(client: JelasticClient, args: dict) -> dict:
     env_name = _req_str(args, "env_name")
     logs = await client.get_logs(env_name, limit=_opt_int(args, "limit"))
-    return {"env_name": env_name, "logs": logs, "count": len(logs)}
+    framed = []
+    for entry in logs:
+        if isinstance(entry, dict):
+            framed.append({
+                k: _frame_platform_text(v) if k in ("message", "text") else v
+                for k, v in entry.items()})
+        else:
+            framed.append(_frame_platform_text(entry))
+    return {"env_name": env_name, "logs": framed, "count": len(framed)}
 
 
 async def _h_env_var_get(client: JelasticClient, args: dict) -> dict:
@@ -412,18 +459,18 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "cloudlet preset). " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "stack": {"type": "string",
+            "stack": {**STACK,
                       "description": "App stack, e.g. 'php:8.3', 'java:21', "
                                      "'nodejs:20'. Default 'php:8.3'."},
-            "db": {"type": "string",
+            "db": {**STACK,
                    "description": "Optional database node, e.g. 'mysql:8.0', "
                                   "'postgres:16', 'redis:7.2'."},
-            "cloudlets": {"type": "integer",
+            "cloudlets": {"type": "integer", "minimum": 1, "maximum": 128,
                           "description": "Cloudlets per node (1 fixed + the "
                                          "rest flexible), e.g. 4 (Dev) or 12 "
                                          "(Prod). Default 8."},
-            "region": {"type": "string", "description": "Region hint."},
-            "display_name": {"type": "string",
+            "region": {**TEXT, "description": "Region hint."},
+            "display_name": {**TEXT,
                              "description": "Human-readable name."},
         }, ("env_name",), mutating=True), _h_env_create),
     ToolSpec(
@@ -447,7 +494,7 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "never stored).",
         _schema({
             "env_name": _ENV_NAME,
-            "password": {"type": "string",
+            "password": {"type": "string", "minLength": 1, "maxLength": 256,
                          "description": "The platform account password. "
                                         "Forwarded once to deleteenv and "
                                         "never stored."},
@@ -458,11 +505,13 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "node_id": {"type": "integer", "description": "Node id from "
-                        "env_info."},
-            "fixed_cloudlets": {"type": "integer", "description": "Fixed "
+            "node_id": {"type": "integer", "minimum": 1, "maximum": 10000000,
+                        "description": "Node id from env_info."},
+            "fixed_cloudlets": {"type": "integer", "minimum": 0,
+                                "maximum": 128, "description": "Fixed "
                                 "cloudlets (>= 0)."},
-            "flexible_cloudlets": {"type": "integer", "description":
+            "flexible_cloudlets": {"type": "integer", "minimum": 0,
+                                   "maximum": 128, "description":
                                    "Flexible cloudlets (>= 0)."},
         }, ("env_name", "node_id", "fixed_cloudlets", "flexible_cloudlets"),
             mutating=True), _h_node_scale),
@@ -472,7 +521,14 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "groups). " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "nodes": {"type": "array", "items": {"type": "object"}, "description":
+            "nodes": {"type": "array", "maxItems": 20,
+                      "items": {"type": "object",
+                                "allowedKeys": ["nodeType", "nodeGroup",
+                                                "count", "fixedCloudlets",
+                                                "flexibleCloudlets",
+                                                "displayName"],
+                                "valueMaxLength": 64},
+                      "description":
                       "Node group specs: {nodeType?, nodeGroup?, count?, "
                       "fixedCloudlets?, flexibleCloudlets?}."},
         }, ("env_name", "nodes"), mutating=True), _h_topology_change),
@@ -482,12 +538,14 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "environment context. " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "url": {"type": "string", "description": "Public archive URL."},
-            "archive": {"type": "string", "description": "Archive name "
+            "url": {"type": "string", "maxLength": 2048,
+                    "description": "Public archive URL (SSRF-guarded: only "
+                                   "public http(s) targets are accepted)."},
+            "archive": {**ARCHIVE, "description": "Archive name "
                         "(pre-uploaded). Exactly one of url/archive."},
-            "context": {"type": "string", "description": "Deployment context "
+            "context": {**CONTEXT, "description": "Deployment context "
                         "path. Default 'ROOT'."},
-            "node_group": {"type": "string", "description": "Target node "
+            "node_group": {**NODE_GROUP, "description": "Target node "
                            "group (e.g. 'cp')."},
         }, ("env_name",), mutating=True), _h_deploy_archive),
     ToolSpec(
@@ -496,7 +554,8 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "environment. " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "jps": {"type": "string", "description": "JPS manifest URL or "
+            "jps": {"type": "string", "maxLength": 65536,
+                    "description": "JPS manifest URL (SSRF-guarded) or "
                     "inline YAML/JSON text."},
             "settings": {"description": "Installation settings (object or "
                          "JSON string)."},
@@ -507,18 +566,20 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "version, cloudlets). " + _CONFIRM_NOTE,
         _schema({
             "env_name": _ENV_NAME,
-            "engine": {"type": "string", "description": "Database engine: "
+            "engine": {**STACK, "description": "Database engine: "
                        "'mysql', 'mariadb', 'postgres', 'mongodb', 'redis', "
-                       "etc."},
-            "version": {"type": "string", "description": "Engine version, "
+                       "'etc.'"},
+            "version": {**VERSION, "description": "Engine version, "
                         "e.g. '8.0'."},
-            "cloudlets": {"type": "integer", "description": "Cloudlets for "
+            "cloudlets": {"type": "integer", "minimum": 1, "maximum": 128,
+                          "description": "Cloudlets for "
                           "the database node. Default 8."},
         }, ("env_name", "engine"), mutating=True), _h_db_add),
     ToolSpec(
         "logs_read", "Read the recent event/operation log of an environment.",
         _schema({"env_name": _ENV_NAME,
-                 "limit": {"type": "integer", "description": "Max entries "
+                 "limit": {"type": "integer", "minimum": 1, "maximum": 500,
+                           "description": "Max entries "
                            "(most recent)."}}, ("env_name",),
                 mutating=False), _h_logs_read),
     ToolSpec(
@@ -528,7 +589,10 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
     ToolSpec(
         "env_var_set", "Replace an environment's variables. " + _CONFIRM_NOTE,
         _schema({"env_name": _ENV_NAME,
-                 "vars": {"type": "object", "description": "Full variable "
+                 "vars": {"type": "object", "maxProperties": 100,
+                          "keyPattern": r"^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+                          "valueMaxLength": 4096,
+                          "description": "Full variable "
                           "map to set (replaces the existing set)."}},
                 ("env_name", "vars"), mutating=True), _h_env_var_set),
     ToolSpec(
@@ -536,19 +600,20 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
         "Issue a Let's Encrypt SSL certificate for a custom external domain. "
         + _CONFIRM_NOTE,
         _schema({"env_name": _ENV_NAME,
-                 "ext_domain": {"type": "string", "description": "External "
+                 "ext_domain": {**DOMAIN, "description": "External "
                                 "domain bound to the environment."}},
                 ("env_name", "ext_domain"), mutating=True), _h_ssl_letsencrypt),
     ToolSpec(
         "marketplace_list",
         "Browse the app catalog: categories, or apps in a category.",
-        _schema({"category": {"type": "integer", "description": "Category id "
+        _schema({"category": {"type": "integer", "minimum": 0, "maximum": 9999,
+                              "description": "Category id "
                               "(omit for the category list)."}},
                 mutating=False), _h_marketplace_list),
     ToolSpec(
         "templates_list",
         "Available stacks/engines (node types, versions, node groups).",
-        _schema({"node_group": {"type": "string", "description": "Filter by "
+        _schema({"node_group": {**NODE_GROUP, "description": "Filter by "
                                "node group ('cp', 'db', 'balancer')."}},
                 mutating=False), _h_templates_list),
     ToolSpec(
@@ -565,11 +630,12 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
             "env_name": _ENV_NAME,
             "op": {"type": "string", "enum": ["status", "gone", "nodes_ready"],
                    "description": "What to wait for."},
-            "target": {"type": "array", "items": {"type": "string"},
+            "target": {"type": "array", "items": STATUS, "maxItems": 10,
                        "description": "For op='status': wanted status names "
                        "(default ['running'])."},
-            "timeout": {"type": "number", "description": "Seconds to wait "
-                        "(default 30)."},
+            "timeout": {"type": "number", "minimum": 0.001, "maximum": 600,
+                        "description": "Seconds to wait "
+                        "(default 30, capped at 600)."},
         }, ("env_name",), mutating=False), _h_op_result),
 ]}
 
@@ -604,6 +670,10 @@ def _friendly_error(exc: JelasticError) -> Tuple[str, str]:
         MalformedResponseError: ("malformed_response",
                                  "unexpected response from the platform "
                                  "(proxy/WAF page?)"),
+        RedirectBlockedError: ("redirect_refused",
+                               "the platform answered with a redirect; "
+                               "refused so the session token cannot leave "
+                               "the platform origin"),
     }
     for exc_type, (code, message) in mapping.items():
         if isinstance(exc, exc_type):
@@ -614,61 +684,105 @@ def _friendly_error(exc: JelasticError) -> Tuple[str, str]:
     return "platform_error", exc.message or "platform error"
 
 
+# Default policy for direct execute_tool calls (the server passes its own).
+_DEFAULT_POLICY = security.SecurityPolicy.from_env()
+
+
 async def execute_tool(name: str, arguments: Optional[dict],
                        auth: Optional[AuthConfig], *,
                        transport=None, timeout: float = 30.0,
-                       poll_interval: float = 0.25) -> Tuple[dict, bool]:
+                       poll_interval: float = 0.25,
+                       policy: Optional[security.SecurityPolicy] = None,
+                       audit: Optional[security.AuditLog] = None) -> Tuple[dict, bool]:
     """Run one tool. Returns ``(payload, is_error)``.
 
-    Safety gates run before anything touches the platform; the password of
-    ``env_delete`` is forwarded once and never appears in any payload.
+    Security gates run before anything touches the platform (docs/SECURITY.md):
+    host allowlist (token pinning), read-only mode, the ``confirm`` gate,
+    strict input validation, then per-session rate limits. Every result is
+    secret-masked; the ``env_delete`` password is forwarded once and never
+    appears in any payload or audit entry.
     """
+    policy = policy or _DEFAULT_POLICY
+
+    def _fail(code: str, message: str) -> Tuple[dict, bool]:
+        payload = {"error": {"code": code, "message": message}}
+        if audit is not None:
+            audit.record({"tool": name, "ok": False, "code": code,
+                          "args": args})
+        return security.mask_secrets(payload), True
+
     spec = TOOLS.get(name)
-    if spec is None:
-        return ({"error": {"code": "unknown_tool",
-                           "message": f"unknown tool [{name}]"}}, True)
     args = arguments or {}
+    if spec is None:
+        return _fail("unknown_tool", f"unknown tool [{name}]")
     if not isinstance(args, dict):
-        return ({"error": {"code": "invalid_parameter",
-                           "message": "arguments must be an object"}}, True)
+        return _fail("invalid_parameter", "arguments must be an object")
 
     if auth is None:
-        return ({"error": {
-            "code": "no_credentials",
-            "message": "platform credentials required: X-Jelastic-Host and "
-                       "X-Jelastic-Session headers (HTTP) or JELASTIC_HOST / "
-                       "JELASTIC_SESSION (stdio)"}}, True)
+        return _fail("no_credentials",
+                     "platform credentials required: X-Jelastic-Host and "
+                     "X-Jelastic-Session headers (HTTP) or JELASTIC_HOST / "
+                     "JELASTIC_SESSION (stdio)")
+
+    try:
+        policy.check_host(auth.host)
+    except security.HostNotAllowedError as exc:
+        return _fail(exc.code, str(exc))
+
+    if spec.mutating and policy.readonly_now():
+        return _fail("read_only_mode",
+                     f"[{name}] was refused: the server is in read-only mode "
+                     f"(VAM_MCP_READONLY=1); mutating tools are disabled")
 
     if spec.mutating and args.get("confirm") is not True:
-        return ({"error": {
-            "code": "confirm_required",
-            "message": f"[{name}] changes the platform state and was refused: "
-                       "re-call with confirm=true ONLY after the user has "
-                       "explicitly confirmed this exact action"}}, True)
+        return _fail("confirm_required",
+                     f"[{name}] changes the platform state and was refused: "
+                     f"re-call with confirm=true ONLY after the user has "
+                     f"explicitly confirmed this exact action")
 
     if name == "env_delete":
         password = args.get("password")
         if not isinstance(password, str) or not password:
-            return ({"error": {
-                "code": "password_required",
-                "message": "[env_delete] requires the account password "
-                           "(argument [password]); it is forwarded once to "
-                           "the platform and never stored"}}, True)
+            return _fail("password_required",
+                         "[env_delete] requires the account password "
+                         "(argument [password]); it is forwarded once to "
+                         "the platform and never stored")
+
+    try:
+        security.validate_args(spec.input_schema, args, name)
+    except security.ParamRejected as exc:
+        return _fail(exc.code, str(exc))
+
+    try:
+        policy.limiter.check(
+            policy.limiter.session_key(auth.session), mutating=spec.mutating)
+    except security.RateLimitExceeded as exc:
+        return _fail(exc.code, str(exc))
 
     client = JelasticClient(auth.host, auth.session, timeout=timeout,
                             transport=transport, poll_interval=poll_interval)
     try:
         payload = await spec.handler(client, args)
-        return payload, False
+        is_error = False
     except ToolInputError as exc:
-        return ({"error": {"code": "invalid_parameter", "message": str(exc)}},
-                True)
+        payload, is_error = ({"error": {"code": "invalid_parameter",
+                                        "message": str(exc)}}, True)
+    except security.SecurityViolation as exc:
+        payload, is_error = ({"error": {"code": exc.code,
+                                        "message": str(exc)}}, True)
     except OperationTimeout as exc:
         # A timeout is NOT a failure: the operation may still be running.
-        return ({"status": "in_progress", "message": str(exc),
-                 "observed": exc.observed}, False)
+        payload, is_error = ({"status": "in_progress", "message": str(exc),
+                              "observed": exc.observed}, False)
     except JelasticError as exc:
         code, message = _friendly_error(exc)
-        return ({"error": {"code": code, "message": message}}, True)
+        payload, is_error = ({"error": {"code": code, "message": message}},
+                             True)
     finally:
         await client.aclose()
+
+    payload = security.mask_secrets(payload)
+    if audit is not None:
+        audit.record({"tool": name, "mutating": spec.mutating,
+                      "ok": not is_error, "args": args})
+    return payload, is_error

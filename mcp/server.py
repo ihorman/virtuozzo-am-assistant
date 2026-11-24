@@ -23,6 +23,7 @@ import uuid
 from typing import Any, Optional, TextIO
 
 from . import protocol
+from . import security
 from .protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -58,10 +59,13 @@ class MCPServer:
     platform client at an in-process ASGI app (tests) instead of the network."""
 
     def __init__(self, *, transport=None, timeout: float = 30.0,
-                 poll_interval: float = 0.25):
+                 poll_interval: float = 0.25,
+                 policy: Optional[security.SecurityPolicy] = None):
         self.transport = transport
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self.policy = policy or security.SecurityPolicy.from_env()
+        self.audit = security.AuditLog()
 
     # -- protocol core ------------------------------------------------------
 
@@ -147,7 +151,8 @@ class MCPServer:
         payload, is_error = await execute_tool(
             name, arguments, auth,
             transport=self.transport, timeout=self.timeout,
-            poll_interval=self.poll_interval)
+            poll_interval=self.poll_interval,
+            policy=self.policy, audit=self.audit)
         return {
             "content": [{"type": "text", "text": json.dumps(payload)}],
             "isError": is_error,
@@ -169,6 +174,13 @@ class MCPServer:
                 # Legal per Streamable HTTP: no server-initiated stream /
                 # no session termination support.
                 return Response(status_code=405, headers={"Allow": "POST"})
+            context_header = request.headers.get("x-vap-context")
+            if context_header:
+                # T4: extension page context is DATA, sanitized and framed;
+                # recorded for audit only, never treated as instructions.
+                server.audit.record({"kind": "extension_context",
+                                     "context": security.sanitize_context(
+                                         context_header)})
             auth = None
             try:
                 auth = AuthConfig.from_headers(request.headers)
@@ -195,9 +207,15 @@ class MCPServer:
             return JSONResponse({"status": "ok", "service": SERVER_NAME,
                                  "version": SERVER_VERSION})
 
+        async def audit_endpoint(request: Request):
+            # Masked, bounded audit trail (docs/SECURITY.md mitigation 7).
+            entries = server.audit.entries()
+            return JSONResponse({"entries": entries, "count": len(entries)})
+
         return Starlette(routes=[
             Route("/mcp", mcp_endpoint, methods=["POST", "GET", "DELETE"]),
             Route("/healthz", healthz, methods=["GET"]),
+            Route("/api/audit", audit_endpoint, methods=["GET"]),
         ])
 
     # -- stdio transport ----------------------------------------------------

@@ -38,3 +38,35 @@
 
 Tests: `tests/test_client.py`, `tests/test_mcp_tools.py` (against `mock/`,
 no real network — enforced by a socket guard in `tests/conftest.py`).
+
+## Security hardening (T10, docs/SECURITY.md)
+
+`mcp/security.py` implements the confinement layer, enforced in
+`execute_tool` before any platform call and covered by
+`tests/test_security.py`:
+
+- **Host allowlist + token pinning** — `X-Jelastic-Host`/`JELASTIC_HOST` must
+  match `VAM_ALLOWED_HOSTS` (exact origins or `*.suffix` wildcards; empty =
+  open mode). Redirects are never followed (`follow_redirects=False`; a 3xx
+  is a `redirect_refused` error), so the session token cannot leave the
+  pinned origin.
+- **SSRF guard** — `deploy_archive` URLs and `deploy_jps` manifest URLs must
+  be public http(s): userinfo and non-http(s) schemes are refused, every
+  resolved address must be globally routable (private/loopback/link-local/
+  metadata/CGNAT/IPv4-mapped blocked; decimal/hex/octal IP smuggling
+  caught), and `SsrfGuard.safe_fetch` re-validates every redirect hop.
+- **Strict validation** — anchored patterns on `env_name`/`nodeGroup`/
+  `context`/stacks/domains, int/enum/length caps on every parameter, unknown
+  parameters rejected (schema-driven via `security.validate_args`).
+- **Secret masking** — `mask_secrets` scrubs secret-looking keys and inline
+  `session=`/`token=` fragments from every tool result and audit entry
+  (`GET /api/audit`, bounded); no credentials are stored server-side.
+- **Rate/depth limits** — per-session tool calls/min and mutations/hour
+  (`VAM_MCP_CALLS_PER_MIN`, `VAM_MCP_MUTATIONS_PER_HOUR`); `op_result`
+  polling is capped at `VAM_MCP_MAX_POLL_SECONDS` (default 600). Trips
+  return a plain `rate_limited` refusal.
+- **Read-only mode** — `VAM_MCP_READONLY=1` refuses every mutating tool
+  (`read_only_mode`) even with `confirm=true`.
+- **Untrusted-data framing** — platform-returned text (logs, JPS messages)
+  and extension `X-Vap-Context` are sanitized and wrapped in
+  `<untrusted-data>` markers, so prompt-injection payloads stay DATA.
