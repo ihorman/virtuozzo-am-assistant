@@ -13,6 +13,7 @@ needs no background timers, so it is deterministic under test.
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import time
@@ -29,6 +30,7 @@ from .codes import (
     MANIFEST_CORRUPTED,
     NODE_NOT_FOUND,
     OK,
+    PORT_CONFLICT,
     SESSION_INVALID,
     STATUS_CODES,
     TRANSIENT_STATES,
@@ -37,6 +39,58 @@ from .codes import (
 ENV_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
 DOMAIN_RE = re.compile(
     r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+SUBNET_RE = re.compile(r"^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$")
+PORTS_RE = re.compile(r"^[0-9]{1,5}(-[0-9]{1,5})?$")
+BILLING_TIME_RE = re.compile(
+    r"^([0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?Z?)?"
+    r"|[0-9]{1,13})$")
+
+
+def _valid_subnet(value: Any) -> bool:
+    if not value or not SUBNET_RE.match(str(value)):
+        return False
+    return all(int(o) <= 255 for o in str(value).split("/", 1)[0].split("."))
+
+
+def _valid_ports(value: Any) -> bool:
+    if not value or not PORTS_RE.match(str(value)):
+        return False
+    lo, _, hi = str(value).partition("-")
+    hi = hi or lo
+    return 1 <= int(lo) <= int(hi) <= 65535
+
+
+CRON_FIELD_RE = re.compile(
+    r"^(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?(,(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?)*$")
+CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _valid_cron(value: Any) -> bool:
+    """Five-field cron: minute hour dom month dow, ranges checked per field."""
+    if not value:
+        return False
+    fields = str(value).split()
+    if len(fields) != 5:
+        return False
+    for crontab_field, (lo, hi) in zip(fields, CRON_RANGES):
+        if CRON_FIELD_RE.fullmatch(crontab_field) is None:
+            return False
+        for part in crontab_field.split(","):
+            base, _, step = part.partition("/")
+            if step and (not step.isdigit() or int(step) < 1):
+                return False
+            if base == "*":
+                continue
+            try:
+                values = [int(n) for n in base.split("-")]
+            except ValueError:
+                return False
+            if any(v < lo or v > hi for v in values):
+                return False
+            if len(values) == 2 and values[0] > values[1]:
+                return False
+    return True
 
 # --- static catalog data (marketplace / templates) -------------------------
 
@@ -162,6 +216,16 @@ class Env:
     vcs: Optional[dict] = None
     installations: list = field(default_factory=list)
     ssl: Optional[dict] = None
+    # T13 coverage state: bound external domains, public endpoints, container
+    # firewall rules, the node file tree, autoscaling triggers, scheduled
+    # tasks and collaboration shares.
+    ext_domains: list = field(default_factory=list)
+    endpoints: list = field(default_factory=list)
+    firewall_rules: list = field(default_factory=list)
+    files: dict = field(default_factory=dict)
+    triggers: list = field(default_factory=list)
+    tasks: list = field(default_factory=list)
+    shares: list = field(default_factory=list)
 
     def advance(self, now: float) -> None:
         if self.pending and now >= self.pending[0]:
@@ -198,6 +262,7 @@ class Env:
         env["app"] = dict(self.app) if self.app else None
         env["installations"] = [dict(i) for i in self.installations]
         env["ssl"] = dict(self.ssl) if self.ssl else None
+        env["extDomains"] = [dict(d) for d in self.ext_domains]
         return env
 
     def to_node_groups(self) -> list:
@@ -221,6 +286,7 @@ class MockJelastic:
         self.sessions: dict[str, float] = {}  # token -> expiry (clock)
         self.envs: dict[str, Env] = {}
         self._next_node_id = 1001
+        self._next_entity_id = 4001  # endpoint/rule/trigger/task ids
         #: REST method names seen by the server (for routing assertions).
         self.calls: list = []
 
@@ -262,6 +328,19 @@ class MockJelastic:
     def _new_node_id(self) -> int:
         self._next_node_id += 1
         return self._next_node_id
+
+    def _new_id(self) -> int:
+        self._next_entity_id += 1
+        return self._next_entity_id
+
+    @staticmethod
+    def _default_files(name: str) -> dict:
+        """A tiny seeded file tree so the file manager has something real."""
+        return {
+            "/var/www/webroot/ROOT/index.html":
+                f"<html><head><title>{name}</title></head>"
+                f"<body>hello from {name}</body></html>\n",
+        }
 
     def _log(self, env: Env, message: str) -> None:
         env.logs.append(f"[{self._now():.3f}] {message}")
@@ -383,6 +462,7 @@ class MockJelastic:
                 {"nodeType": "cp", "nodeGroup": "cp",
                  "fixedCloudlets": 1, "flexibleCloudlets": 7}
             ]),
+            files=self._default_files(name),
         )
         for node in created.nodes:
             node.status = "updating"
@@ -1010,3 +1090,649 @@ class MockJelastic:
         self._log(env, f"Let's Encrypt SSL issued for {ext_domain}")
         return OK, {"envName": env.name, "extDomain": str(ext_domain),
                     "issuer": "Let's Encrypt", "status": "issued"}
+
+    # -- domains (environment/binder/rest/*) --------------------------------
+
+    def bindextdomain(self, session, env_name=None, ext_domain=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        if not ext_domain or not DOMAIN_RE.match(str(ext_domain)):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [extDomain] for method "
+                         "[BindExtDomain]"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        domain = str(ext_domain)
+        for other in self.envs.values():
+            if other is not env and any(d["extDomain"] == domain
+                                       for d in other.ext_domains):
+                return DOMAIN_UNAVAILABLE, {"error": "domain not available"}
+        if not any(d["extDomain"] == domain for d in env.ext_domains):
+            env.ext_domains.append({"extDomain": domain,
+                                    "boundAt": self._now()})
+        self._log(env, f"external domain {domain} bound")
+        return OK, {"envName": env.name, "extDomain": domain}
+
+    def removeextdomain(self, session, env_name=None, ext_domain=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        entry = next((d for d in env.ext_domains
+                      if d["extDomain"] == str(ext_domain)), None)
+        if entry is None:
+            return INVALID_PARAMETER, {
+                "error": f"external domain [{ext_domain}] is not bound to "
+                         f"[{env_name}]"}
+        env.ext_domains.remove(entry)
+        self._log(env, f"external domain {ext_domain} unbound")
+        return OK, {"envName": env.name, "extDomain": str(ext_domain)}
+
+    # -- clone / restart (environment/control/rest/*) -----------------------
+
+    def cloneenv(self, session, src_env_name=None, dst_env_name=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        if not dst_env_name or not ENV_NAME_RE.match(str(dst_env_name)):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [dstEnvName] for method [CloneEnv]"}
+        code, src = self._get_env(src_env_name)
+        if src is None:
+            return code, {"error": f"environment [{src_env_name}] not found"}
+        if src.status == "deleting" or src.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{src_env_name}] is being deleted"}
+        self.advance_all()
+        dst_name = str(dst_env_name)
+        if dst_name in self.envs:
+            return DOMAIN_UNAVAILABLE, {"error": "domain not available"}
+        now = self._now()
+        ready_at = now + self.config.transition_seconds
+        clone = Env(
+            name=dst_name,
+            domain=f"{dst_name}.{self.config.domain_suffix}",
+            region=src.region, engine=src.engine,
+            display_name=src.display_name, owner=self.config.login,
+            created=now, status="creating", pending=(ready_at, "running"),
+            nodes=[], env_vars=dict(src.env_vars), files=dict(src.files),
+            app=dict(src.app) if src.app else None,
+        )
+        for node in src.nodes:
+            clone.nodes.append(Node(
+                id=self._new_node_id(), node_type=node.node_type,
+                node_group=node.node_group, display_name=node.display_name,
+                fixed_cloudlets=node.fixed_cloudlets,
+                flexible_cloudlets=node.flexible_cloudlets,
+                status="updating", pending=(ready_at, "ok")))
+        clone.triggers = [{**t, "id": self._new_id()} for t in src.triggers]
+        clone.tasks = [{**t, "id": self._new_id()} for t in src.tasks]
+        self._log(clone, f"cloned from [{src.name}]")
+        self.envs[dst_name] = clone
+        return OK, {"envName": dst_name, "domain": clone.domain,
+                    "statusName": clone.status}
+
+    def restartnodes(self, session, env_name=None, node_group=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if env.status == "deleting" or env.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{env_name}] is being deleted"}
+        if env.status != "running":
+            return INVALID_PARAMETER, {
+                "error": f"method [RestartNodes] is not allowed in status "
+                         f"[{env.status}]"}
+        targets = [n for n in env.nodes
+                   if node_group in (None, "")
+                   or n.node_group == str(node_group)]
+        if not targets:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [nodeGroup] for method "
+                         "[RestartNodes]"}
+        now = self._now()
+        for node in targets:
+            node.status = "updating"
+            node.pending = (now + self.config.transition_seconds, "ok")
+        self._log(env, f"restart requested for {len(targets)} node(s)")
+        return OK, {"envName": env.name,
+                    "nodes": [n.to_dict() for n in targets]}
+
+    def restartnodebyid(self, session, env_name=None, node_id=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if env.status == "deleting" or env.removed:
+            return DELETE_IN_PROGRESS, {
+                "error": f"environment [{env_name}] is being deleted"}
+        if env.status != "running":
+            return INVALID_PARAMETER, {
+                "error": f"method [RestartNodeById] is not allowed in status "
+                         f"[{env.status}]"}
+        try:
+            node_id = int(node_id)
+        except (TypeError, ValueError):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [nodeId] for method "
+                         "[RestartNodeById]"}
+        node = next((n for n in env.nodes if n.id == node_id), None)
+        if node is None:
+            return NODE_NOT_FOUND, {"error": f"node [{node_id}] not found"}
+        now = self._now()
+        node.status = "updating"
+        node.pending = (now + self.config.transition_seconds, "ok")
+        self._log(env, f"restart requested for node {node_id}")
+        return OK, {"envName": env.name, "node": node.to_dict()}
+
+    # -- ports & endpoints (environment/control/rest/*) ---------------------
+
+    def getendpoints(self, session, env_name=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        return OK, {"array": [dict(e) for e in env.endpoints]}
+
+    def addendpoint(self, session, env_name=None, node_id=None, name=None,
+                    private_port=None, protocol=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        node, error = self._node_for_logs(env, node_id)
+        if error:
+            return error
+        protocol = str(protocol or "").upper()
+        if protocol not in ("TCP", "UDP"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [protocol] for method [AddEndpoint]"}
+        try:
+            port = int(private_port)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [privatePort] for method "
+                         "[AddEndpoint]"}
+        if not name:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [name] for method [AddEndpoint]"}
+        clash = next((e for e in env.endpoints
+                      if e["nodeId"] == node.id
+                      and e["privatePort"] == port
+                      and e["protocol"] == protocol), None)
+        if clash is not None:
+            return PORT_CONFLICT, {
+                "error": f"endpoint port conflict: [{protocol}/{port}] is "
+                         f"already exposed on node [{node.id}]"}
+        endpoint = {"id": self._new_id(), "name": str(name)[:64],
+                    "nodeId": node.id, "protocol": protocol,
+                    "privatePort": port,
+                    "publicPort": 10000 + (self._next_entity_id % 20000),
+                    "createdAt": self._now()}
+        env.endpoints.append(endpoint)
+        self._log(env, f"endpoint {protocol}/{port} opened on node {node.id}")
+        return OK, {"endpoint": dict(endpoint)}
+
+    def removeendpoint(self, session, env_name=None, id=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        try:
+            endpoint_id = int(id)
+        except (TypeError, ValueError):
+            endpoint_id = 0
+        entry = next((e for e in env.endpoints if e["id"] == endpoint_id), None)
+        if entry is None:
+            return INVALID_PARAMETER, {
+                "error": f"endpoint [{id}] not found"}
+        env.endpoints.remove(entry)
+        self._log(env, f"endpoint {entry['protocol']}/"
+                       f"{entry['privatePort']} closed")
+        return OK, {"envName": env.name, "id": endpoint_id}
+
+    # -- container firewall (environment/security/rest/*) -------------------
+
+    def getrules(self, session, env_name=None, node_id=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        rules = env.firewall_rules
+        if node_id not in (None, ""):
+            node, error = self._node_for_logs(env, node_id)
+            if error:
+                return error
+            rules = [r for r in rules if r["nodeId"] == node.id]
+        return OK, {"array": [dict(r) for r in rules]}
+
+    def addrule(self, session, env_name=None, node_id=None, protocol=None,
+                ports=None, src=None, action=None, priority=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        node, error = self._node_for_logs(env, node_id)
+        if error:
+            return error
+        protocol = str(protocol or "").upper()
+        if protocol not in ("TCP", "UDP"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [protocol] for method [AddRule]"}
+        action = str(action or "").upper()
+        if action not in ("ACCEPT", "DROP"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [action] for method [AddRule]"}
+        if not _valid_ports(ports):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [ports] for method [AddRule]"}
+        if not _valid_subnet(src):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [src] for method [AddRule]"}
+        duplicate = any(r["nodeId"] == node.id and r["protocol"] == protocol
+                        and r["ports"] == str(ports) and r["src"] == str(src)
+                        and r["action"] == action
+                        for r in env.firewall_rules)
+        if duplicate:
+            return INVALID_PARAMETER, {
+                "error": "duplicate firewall rule"}
+        try:
+            priority = int(priority if priority not in (None, "") else 1)
+        except (TypeError, ValueError):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [priority] for method [AddRule]"}
+        rule = {"id": self._new_id(), "nodeId": node.id, "protocol": protocol,
+                "ports": str(ports), "src": str(src), "action": action,
+                "priority": priority, "enabled": True}
+        env.firewall_rules.append(rule)
+        self._log(env, f"firewall rule {action} {protocol}/{ports} from {src} "
+                       f"added on node {node.id}")
+        return OK, {"rule": dict(rule)}
+
+    def removerule(self, session, env_name=None, id=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        try:
+            rule_id = int(id)
+        except (TypeError, ValueError):
+            rule_id = 0
+        rule = next((r for r in env.firewall_rules if r["id"] == rule_id), None)
+        if rule is None:
+            return INVALID_PARAMETER, {
+                "error": f"firewall rule [{id}] not found"}
+        env.firewall_rules.remove(rule)
+        self._log(env, f"firewall rule [{rule_id}] removed from node "
+                       f"{rule['nodeId']}")
+        return OK, {"envName": env.name, "id": rule_id}
+
+    # -- file manager (environment/file/rest/*) -----------------------------
+
+    def _file_gate(self, session, env_name, node_id):
+        code = self._auth(session)
+        if code != OK:
+            return None, (code, {"error": "session expired or invalid"})
+        code, env = self._get_env(env_name)
+        if env is None:
+            return None, (code, {"error": f"environment [{env_name}] not found"})
+        node, error = self._node_for_logs(env, node_id)
+        if error:
+            return None, error
+        return (env, node), None
+
+    @staticmethod
+    def _safe_path(path):
+        """Absolute normalized path only - traversal is refused outright."""
+        path = str(path or "")
+        if (not path.startswith("/") or "\x00" in path or "//" in path
+                or any(seg == ".." for seg in path.split("/"))):
+            return None
+        return path
+
+    @staticmethod
+    def _fs_dirs(env) -> set:
+        dirs = {"/"}
+        for path in env.files:
+            parts = path.strip("/").split("/")[:-1]
+            for i in range(len(parts)):
+                dirs.add("/" + "/".join(parts[:i + 1]))
+        return dirs
+
+    @staticmethod
+    def _fs_children(env, path) -> list:
+        prefix = "/" if path == "/" else path.rstrip("/") + "/"
+        entries = []
+        seen_dirs = set()
+        for file_path, content in sorted(env.files.items()):
+            if not file_path.startswith(prefix):
+                continue
+            rest = file_path[len(prefix):]
+            if "/" in rest:
+                name = rest.split("/", 1)[0]
+                if name not in seen_dirs:
+                    seen_dirs.add(name)
+                    entries.append({"name": name, "path": prefix + name,
+                                    "size": 0, "type": "DIR",
+                                    "lastModified": "", "permission": "rwd"})
+            else:
+                entries.append({"name": rest, "path": file_path,
+                                "size": len(content.encode("utf-8")),
+                                "type": "FILE", "lastModified": "",
+                                "permission": "rwd"})
+        return entries
+
+    def getlist(self, session, env_name=None, node_id=None, path=None):
+        gate, error = self._file_gate(session, env_name, node_id)
+        if gate is None:
+            return error
+        env, _node = gate
+        path = self._safe_path(path)
+        if path is None:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [path] for method [GetList]"}
+        if path not in self._fs_dirs(env):
+            return INVALID_PARAMETER, {
+                "error": f"path [{path}] not found"}
+        return OK, {"array": self._fs_children(env, path)}
+
+    def read(self, session, env_name=None, node_id=None, path=None):
+        gate, error = self._file_gate(session, env_name, node_id)
+        if gate is None:
+            return error
+        env, _node = gate
+        path = self._safe_path(path)
+        if path is None:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [path] for method [Read]"}
+        content = env.files.get(path)
+        if content is None:
+            return INVALID_PARAMETER, {
+                "error": f"file [{path}] not found"}
+        return OK, {"path": path, "size": len(content.encode("utf-8")),
+                    "body": content}
+
+    def _store_file(self, session, env_name, node_id, path, body, op):
+        gate, error = self._file_gate(session, env_name, node_id)
+        if gate is None:
+            return error
+        env, _node = gate
+        path = self._safe_path(path)
+        if path is None:
+            return INVALID_PARAMETER, {
+                "error": f"invalid parameter [path] for method [{op}]"}
+        if not isinstance(body, str):
+            return INVALID_PARAMETER, {
+                "error": f"invalid parameter [body] for method [{op}]"}
+        parent = "/" if "/" not in path[1:] else path.rsplit("/", 1)[0]
+        if parent not in self._fs_dirs(env):
+            return INVALID_PARAMETER, {
+                "error": f"directory [{parent}] not found"}
+        env.files[path] = body
+        self._log(env, f"file {path} written ({len(body)} chars)")
+        return OK, {"path": path, "size": len(body.encode("utf-8"))}
+
+    def upload(self, session, env_name=None, node_id=None, path=None,
+               body=None):
+        return self._store_file(session, env_name, node_id, path, body,
+                               "Upload")
+
+    def write(self, session, env_name=None, node_id=None, path=None,
+              body=None):
+        return self._store_file(session, env_name, node_id, path, body,
+                               "Write")
+
+    def replaceinbody(self, session, env_name=None, node_id=None, path=None,
+                      search=None, replace=None):
+        gate, error = self._file_gate(session, env_name, node_id)
+        if gate is None:
+            return error
+        env, _node = gate
+        path = self._safe_path(path)
+        if path is None:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [path] for method [ReplaceInBody]"}
+        content = env.files.get(path)
+        if content is None:
+            return INVALID_PARAMETER, {
+                "error": f"file [{path}] not found"}
+        if not isinstance(search, str) or not search:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [search] for method "
+                         "[ReplaceInBody]"}
+        if search not in content:
+            return INVALID_PARAMETER, {
+                "error": f"nothing to replace in [{path}]"}
+        replacement = "" if replace is None else str(replace)
+        count = content.count(search)
+        env.files[path] = content.replace(search, replacement)
+        self._log(env, f"file {path}: {count} replacement(s)")
+        return OK, {"path": path, "replacements": count,
+                    "size": len(env.files[path].encode("utf-8"))}
+
+    # -- autoscaling triggers (environment/trigger/rest/*) ------------------
+
+    TRIGGER_TYPES = ("CPU", "RAM", "DISK", "NET", "REQUESTS")
+
+    def gettriggers(self, session, env_name=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        return OK, {"array": [dict(t) for t in env.triggers]}
+
+    def addtrigger(self, session, env_name=None, node_group=None, type=None,
+                   condition=None, value=None, period=None, amount=None,
+                   action=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        group = str(node_group or "")
+        if not any(n.node_group == group for n in env.nodes):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [nodeGroup] for method "
+                         "[AddTrigger]"}
+        trigger_type = str(type or "").upper()
+        if trigger_type not in self.TRIGGER_TYPES:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [type] for method [AddTrigger]"}
+        if str(condition or "") not in ("<", ">"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [condition] for method "
+                         "[AddTrigger]"}
+        action = str(action or "").upper()
+        if action not in ("ADD", "REMOVE"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [action] for method [AddTrigger]"}
+        try:
+            value = float(value)
+            period = int(period)
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [value] for method [AddTrigger]"}
+        if not 0 <= value <= 100 or not 1 <= period <= 1440 \
+                or not 1 <= amount <= 10:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [value] for method [AddTrigger]"}
+        trigger = {"id": self._new_id(), "nodeGroup": group,
+                   "type": trigger_type, "condition": str(condition),
+                   "value": value, "period": period, "amount": amount,
+                   "action": action, "enabled": True}
+        env.triggers.append(trigger)
+        self._log(env, f"autoscaling trigger added: {trigger_type} "
+                       f"{condition} {value} -> {action} {amount}")
+        return OK, {"trigger": dict(trigger)}
+
+    def deletetrigger(self, session, env_name=None, id=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        try:
+            trigger_id = int(id)
+        except (TypeError, ValueError):
+            trigger_id = 0
+        trigger = next((t for t in env.triggers if t["id"] == trigger_id), None)
+        if trigger is None:
+            return INVALID_PARAMETER, {
+                "error": f"trigger [{id}] not found"}
+        env.triggers.remove(trigger)
+        self._log(env, f"autoscaling trigger [{trigger_id}] removed")
+        return OK, {"envName": env.name, "id": trigger_id}
+
+    # -- task scheduler (utils/scheduler/rest/*) ----------------------------
+
+    def gettasks(self, session, env_name=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        return OK, {"array": [dict(t) for t in env.tasks]}
+
+    def createenvtask(self, session, env_name=None, cron=None, command=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if not _valid_cron(cron):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [cron] for method [CreateEnvTask]"}
+        if not command or not str(command).strip() or len(str(command)) > 256:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [command] for method "
+                         "[CreateEnvTask]"}
+        task = {"id": self._new_id(), "cron": str(cron),
+                "command": str(command), "nodeId": None,
+                "createdAt": self._now()}
+        env.tasks.append(task)
+        self._log(env, f"scheduled task [{task['id']}] created: {cron} "
+                       f"{command}")
+        return OK, {"task": dict(task)}
+
+    def deletetasks(self, session, env_name=None, ids=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if isinstance(ids, str):
+            try:
+                ids = json.loads(ids)
+            except ValueError:
+                ids = None
+        if not isinstance(ids, list) or not ids:
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [ids] for method [DeleteTasks]"}
+        wanted = []
+        for raw in ids:
+            try:
+                wanted.append(int(raw))
+            except (TypeError, ValueError):
+                return INVALID_PARAMETER, {
+                    "error": "invalid parameter [ids] for method "
+                             "[DeleteTasks]"}
+        missing = next((i for i in wanted
+                        if not any(t["id"] == i for t in env.tasks)), None)
+        if missing is not None:
+            return INVALID_PARAMETER, {"error": f"task [{missing}] not found"}
+        env.tasks = [t for t in env.tasks if t["id"] not in set(wanted)]
+        self._log(env, f"scheduled task(s) removed: {wanted}")
+        return OK, {"envName": env.name, "removed": wanted}
+
+    # -- collaboration (users/collaboration/rest/*) -------------------------
+
+    def invitemember(self, session, env_name=None, email=None, role=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        if not email or not EMAIL_RE.match(str(email)):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [email] for method [InviteMember]"}
+        role = str(role or "").lower()
+        if role not in ("admin", "user", "viewer"):
+            return INVALID_PARAMETER, {
+                "error": "invalid parameter [role] for method [InviteMember]"}
+        if any(s["email"] == str(email) for s in env.shares):
+            return INVALID_PARAMETER, {
+                "error": f"[{email}] is already a member of [{env_name}]"}
+        member = {"email": str(email), "role": role, "status": "invited",
+                  "invitedAt": self._now()}
+        env.shares.append(member)
+        self._log(env, f"environment shared with [{email}] as [{role}]")
+        return OK, {"member": dict(member)}
+
+    def getmembers(self, session, env_name=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        code, env = self._get_env(env_name)
+        if env is None:
+            return code, {"error": f"environment [{env_name}] not found"}
+        return OK, {"array": [dict(s) for s in env.shares]}
+
+    # -- billing history (billing/account/rest/*) ---------------------------
+
+    def getextendedaccountbillinghistorybyperiod(self, session,
+                                                 start_time=None,
+                                                 end_time=None):
+        code = self._auth(session)
+        if code != OK:
+            return code, {"error": "session expired or invalid"}
+        for raw, name in ((start_time, "startTime"), (end_time, "endTime")):
+            if raw not in (None, "") and not BILLING_TIME_RE.match(str(raw)):
+                return INVALID_PARAMETER, {
+                    "error": f"invalid parameter [{name}] for method "
+                             f"[GetExtendedAccountBillingHistoryByPeriod]"}
+        self.advance_all()
+        rows = []
+        total = 0.0
+        for env in self.envs.values():
+            if env.removed:
+                continue
+            cloudlets = sum(n.fixed_cloudlets + n.flexible_cloudlets
+                            for n in env.nodes)
+            cost = round(cloudlets * 0.02 * 24, 2)
+            total = round(total + cost, 2)
+            rows.append({"date": "2026-01-01", "envName": env.name,
+                         "nodes": len(env.nodes), "cloudlets": cloudlets,
+                         "hours": 24, "cost": cost})
+        return OK, {"array": rows, "total": total}

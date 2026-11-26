@@ -79,6 +79,10 @@ class NodeNotFoundError(JelasticError):
     """Node does not exist (mock code 2025)."""
 
 
+class PortConflictError(JelasticError):
+    """Endpoint port already exposed on the node (mock code 2027)."""
+
+
 class InvalidParameterError(JelasticError):
     """Missing or invalid parameter (live result 3 / 'invalid parameter')."""
 
@@ -131,6 +135,7 @@ RESULT_CODE_MAP: dict[int, type] = {
     2024: EnvironmentNotFoundError,
     2025: NodeNotFoundError,
     2026: InvalidParameterError,
+    2027: PortConflictError,
 }
 
 #: Numeric env ``status`` -> status name (the classic stable-state catalog).
@@ -667,6 +672,223 @@ class JelasticClient:
             params={"envName": env_name, "nodeGroup": node_group,
                     "name": name})
         return body.get("object") or body.get("vars") or {}
+
+    # -- T13 coverage: domains, clone, restart, endpoints, firewall, files,
+    #    triggers, scheduler, collaboration, billing (catalog sections
+    #    4.6/4.7/4.10/4.11/4.13/4.14/4.15 + the per-service lists of section 5)
+    #    ---------------------------------------------------------------
+
+    # -- domains (environment/binder/rest/*) --
+
+    async def bind_ext_domain(self, env_name: str, ext_domain: str) -> dict:
+        """Bind a custom external domain (``bindextdomain``)."""
+        return await self._request(
+            "environment/binder/rest/bindextdomain",
+            json_body={"envName": env_name, "extDomain": ext_domain})
+
+    async def unbind_ext_domain(self, env_name: str, ext_domain: str) -> dict:
+        """Unbind a custom external domain.
+
+        The exact catalog name is ``removeextdomain`` (section 5 list; there
+        is no "unbindextdomain" method in the 310-method catalog).
+        """
+        return await self._request(
+            "environment/binder/rest/removeextdomain",
+            json_body={"envName": env_name, "extDomain": ext_domain})
+
+    # -- clone / restart (environment/control/rest/*) --
+
+    async def clone_env(self, src_env_name: str, dst_env_name: str) -> dict:
+        """Clone an environment (``cloneenv``): srcEnvName -> dstEnvName."""
+        return await self._request(
+            "environment/control/rest/cloneenv",
+            json_body={"srcEnvName": src_env_name, "dstEnvName": dst_env_name})
+
+    async def restart_env(self, env_name: str,
+                          node_group: Optional[str] = None) -> dict:
+        """Restart every node of an environment (``restartnodes``).
+
+        Section 5 names the restart family restartnodes / restartnodebyid /
+        restartcontainerbyid / restartservices - a whole-environment restart
+        is ``restartnodes`` without a nodeGroup.
+        """
+        return await self._request(
+            "environment/control/rest/restartnodes",
+            json_body={"envName": env_name, "nodeGroup": node_group})
+
+    async def restart_node(self, env_name: str, node_id: int) -> dict:
+        """Restart one node (``restartnodebyid``)."""
+        return await self._request(
+            "environment/control/rest/restartnodebyid",
+            json_body={"envName": env_name, "nodeId": node_id})
+
+    # -- ports & endpoints (environment/control/rest/*) --
+
+    async def get_endpoints(self, env_name: str) -> list:
+        body = await self._request("environment/control/rest/getendpoints",
+                                   params={"envName": env_name})
+        return body.get("array") or body.get("endpoints") or []
+
+    async def add_endpoint(self, env_name: str, node_id: int, name: str,
+                           private_port: int, protocol: str) -> dict:
+        return await self._request(
+            "environment/control/rest/addendpoint",
+            json_body={"envName": env_name, "nodeId": node_id, "name": name,
+                       "privatePort": private_port, "protocol": protocol})
+
+    async def remove_endpoint(self, env_name: str, endpoint_id: int) -> dict:
+        return await self._request(
+            "environment/control/rest/removeendpoint",
+            json_body={"envName": env_name, "id": endpoint_id})
+
+    # -- container firewall (environment/security/rest/*) --
+    # Section 5 lists the 9 security methods (addrule/addrules/editrule/
+    # getrules/removerule/...); section 4.11's curl block shows the older
+    # addfirewallrule/getfirewallrules spelling - the section-5 names are the
+    # catalog contract used here.
+
+    async def get_firewall_rules(self, env_name: str,
+                                 node_id: Optional[int] = None) -> list:
+        body = await self._request("environment/security/rest/getrules",
+                                   params={"envName": env_name,
+                                           "nodeId": node_id})
+        return body.get("array") or body.get("rules") or []
+
+    async def add_firewall_rule(self, env_name: str, node_id: int, *,
+                                protocol: str, ports: str, src: str,
+                                action: str,
+                                priority: Optional[int] = None) -> dict:
+        return await self._request(
+            "environment/security/rest/addrule",
+            json_body={"envName": env_name, "nodeId": node_id,
+                       "protocol": protocol, "ports": ports, "src": src,
+                       "action": action, "priority": priority})
+
+    async def remove_firewall_rule(self, env_name: str, rule_id: int) -> dict:
+        return await self._request(
+            "environment/security/rest/removerule",
+            json_body={"envName": env_name, "id": rule_id})
+
+    # -- file manager (environment/file/rest/*) --
+    # Section 5's 23-method list is the wire contract (getlist/read/upload/
+    # write/replaceinbody); section 4.10's prose block shows the older
+    # getfiles/getfile/createfile spelling for the same surface.
+
+    async def file_list(self, env_name: str, path: str, *,
+                        node_id: Optional[int] = None) -> list:
+        body = await self._request(
+            "environment/file/rest/getlist",
+            params={"envName": env_name,
+                    "nodeId": await self._resolve_node_id(env_name, node_id),
+                    "path": path})
+        return body.get("array") or []
+
+    async def file_read(self, env_name: str, path: str, *,
+                        node_id: Optional[int] = None) -> dict:
+        body = await self._request(
+            "environment/file/rest/read",
+            params={"envName": env_name,
+                    "nodeId": await self._resolve_node_id(env_name, node_id),
+                    "path": path})
+        return {"path": path, "size": body.get("size"),
+                "body": body.get("body", "")}
+
+    async def file_upload(self, env_name: str, path: str, content: str, *,
+                          node_id: Optional[int] = None) -> dict:
+        """Upload/create a file (``upload``). Text content travels as the
+        form field ``body`` (the tool layer accepts base64 of UTF-8 text)."""
+        return await self._request(
+            "environment/file/rest/upload",
+            json_body={"envName": env_name,
+                       "nodeId": await self._resolve_node_id(env_name, node_id),
+                       "path": path, "body": content})
+
+    async def file_write(self, env_name: str, path: str, content: str, *,
+                         node_id: Optional[int] = None) -> dict:
+        """Replace a file's full content (``write``)."""
+        return await self._request(
+            "environment/file/rest/write",
+            json_body={"envName": env_name,
+                       "nodeId": await self._resolve_node_id(env_name, node_id),
+                       "path": path, "body": content})
+
+    async def file_replace(self, env_name: str, path: str, search: str,
+                           replace: str, *, node_id: Optional[int] = None
+                           ) -> dict:
+        """Find/replace inside a file (``replaceinbody``)."""
+        return await self._request(
+            "environment/file/rest/replaceinbody",
+            json_body={"envName": env_name,
+                       "nodeId": await self._resolve_node_id(env_name, node_id),
+                       "path": path, "search": search, "replace": replace})
+
+    # -- autoscaling triggers (environment/trigger/rest/*) --
+
+    async def get_triggers(self, env_name: str) -> list:
+        body = await self._request("environment/trigger/rest/gettriggers",
+                                   params={"envName": env_name})
+        return body.get("array") or body.get("triggers") or []
+
+    async def add_trigger(self, env_name: str, node_group: str, *,
+                          trigger_type: str, condition: str, value: float,
+                          period: int, amount: int, action: str) -> dict:
+        """Create one trigger (``addtrigger``): type/condition/value/period/
+        amount/action is the catalog's per-direction trigger shape."""
+        return await self._request(
+            "environment/trigger/rest/addtrigger",
+            json_body={"envName": env_name, "nodeGroup": node_group,
+                       "type": trigger_type, "condition": condition,
+                       "value": value, "period": period, "amount": amount,
+                       "action": action})
+
+    async def delete_trigger(self, env_name: str, trigger_id: int) -> dict:
+        return await self._request(
+            "environment/trigger/rest/deletetrigger",
+            json_body={"envName": env_name, "id": trigger_id})
+
+    # -- task scheduler (utils/scheduler/rest/*) --
+    # Section 5's 5-method list (gettasks/createaccounttask/createenvtask/
+    # edittask/deletetasks) is the wire contract; section 4.15's block shows
+    # the older addtask/removetask spelling for the same surface.
+
+    async def get_tasks(self, env_name: str) -> list:
+        body = await self._request("utils/scheduler/rest/gettasks",
+                                   params={"envName": env_name})
+        return body.get("array") or body.get("tasks") or []
+
+    async def create_env_task(self, env_name: str, cron: str, command: str
+                              ) -> dict:
+        return await self._request(
+            "utils/scheduler/rest/createenvtask",
+            json_body={"envName": env_name, "cron": cron, "command": command})
+
+    async def delete_tasks(self, env_name: str, task_ids: list) -> dict:
+        return await self._request(
+            "utils/scheduler/rest/deletetasks",
+            json_body={"envName": env_name, "ids": list(task_ids)})
+
+    # -- collaboration (users/collaboration/rest/*) --
+
+    async def invite_member(self, env_name: str, email: str, role: str) -> dict:
+        """Share an environment (``invitemember``): email + role."""
+        return await self._request(
+            "users/collaboration/rest/invitemember",
+            json_body={"envName": env_name, "email": email, "role": role})
+
+    async def get_members(self, env_name: str) -> list:
+        body = await self._request("users/collaboration/rest/getmembers",
+                                   params={"envName": env_name})
+        return body.get("array") or body.get("members") or []
+
+    # -- billing history (billing/account/rest/*) --
+
+    async def get_billing_history(self, start_time: Optional[str] = None,
+                                  end_time: Optional[str] = None) -> dict:
+        body = await self._request(
+            "billing/account/rest/getextendedaccountbillinghistorybyperiod",
+            params={"startTime": start_time, "endTime": end_time})
+        return {"rows": body.get("array") or body.get("history") or [],
+                "total": body.get("total")}
 
     # -- observable-state polling -------------------------------------------
 

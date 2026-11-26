@@ -18,16 +18,16 @@ Legend: ✅ workflow exists | 🛠 tools exist, needs workflow | ❌ missing |
 | 4 | Vertical scaling (4.2) | node_scale | scale flow | ✅ |
 | 5 | Start / stop / sleep / wake (4.1) | env_start/stop/sleep | direct (asks confirm) | ✅ |
 | 6 | Delete environment (4.1) | env_delete (gated) | direct (danger confirm) | ✅ |
-| 7 | **Custom domain bind/unbind (4.6)** | domain_bind, domain_unbind | domain_setup wizard | ❌ |
+| 7 | **Custom domain bind/unbind (4.6)** | domain_bind, domain_unbind | domain_setup wizard | 🛠 |
 | 8 | **SSL for custom domain (4.6)** | ssl_letsencrypt (have) + domain step | part of domain_setup | 🛠 |
-| 9 | **Clone environment (4.1/4.16)** | env_clone | clone wizard | ❌ |
-| 10 | **Restart env / node (4.3)** | env_restart, node_restart | quick flow (confirm) | ❌ |
-| 11 | **Ports & endpoints: expose/close (4.7)** | endpoint_open, endpoint_close | endpoint flow (security-gated) | ❌ |
-| 12 | **Container firewall rules (4.11)** | firewall_rule_add, firewall_rule_remove | security flow (gated) | ❌ |
-| 13 | **File manager: list/read/upload/edit (4.10)** | file_list, file_read, file_upload, file_edit | fix-it flow uses it | ❌ |
-| 14 | **Auto horizontal scaling triggers (4.2/trigger/*)** | trigger_list, trigger_create, trigger_delete | autoscale_setup wizard | ❌ |
-| 15 | **Scheduled tasks (4.15)** | task_list, task_create, task_delete | schedule_task wizard | ❌ |
-| 16 | **Share environment with team (4.14)** | env_share, env_share_list | share_env wizard | ❌ |
+| 9 | **Clone environment (4.1/4.16)** | env_clone | clone wizard | 🛠 |
+| 10 | **Restart env / node (4.3)** | env_restart, node_restart | quick flow (confirm) | 🛠 |
+| 11 | **Ports & endpoints: expose/close (4.7)** | endpoint_open, endpoint_close | endpoint flow (security-gated) | 🛠 |
+| 12 | **Container firewall rules (4.11)** | firewall_rule_add, firewall_rule_remove | security flow (gated) | 🛠 |
+| 13 | **File manager: list/read/upload/edit (4.10)** | file_list, file_read, file_upload, file_edit | fix-it flow uses it | 🛠 |
+| 14 | **Auto horizontal scaling triggers (4.2/trigger/*)** | trigger_list, trigger_create, trigger_delete | autoscale_setup wizard | 🛠 |
+| 15 | **Scheduled tasks (4.15)** | task_list, task_create, task_delete | schedule_task wizard | 🛠 |
+| 16 | **Share environment with team (4.14)** | env_share, env_share_list | share_env wizard | 🛠 |
 | 17 | Billing / quotas / "explain my bill" (4.13) | quota_get, usage_list | usage_report flow | 🛠 |
 | 18 | Logs & monitoring (4.8, 4.9) | logs_read, env_stats, op_result | used by troubleshoot | ✅ |
 | 19 | Env variables (4.8) | env_var_get/set | direct + deploy flow | ✅ |

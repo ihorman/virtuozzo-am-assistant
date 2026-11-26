@@ -100,6 +100,23 @@ v1 wraps the ~22 methods that cover the end-user flows:
 | `deploy_vcs` | `deployment/rest/addrepo` + `deploy` + `update` | git deploy: register the repo, deploy, fetch recent changes |
 | `deploy_any` | `marketplace/jps/rest/install` (generated JPS) | tiered deploy for ANY language: runtime-image manifest or VPS bootstrap |
 | `app_healthcheck` | — (GET the app URL) | "did it start" verify: {status, title, ok, error_class}; powers auto-repair |
+| `domain_bind` / `domain_unbind` | `environment/binder/rest/bindextdomain` / `removeextdomain` | bind/unbind a custom domain; `ssl=true` also issues Let's Encrypt (`bindssl`); gated |
+| `env_clone` | `environment/control/rest/cloneenv` | full clone (topology, data, config) under a new name; gated |
+| `env_restart` / `node_restart` | `restartnodes` / `restartnodebyid` | brief service outage; gated |
+| `endpoint_open` / `endpoint_close` | `addendpoint` / `removeendpoint` | PUBLIC EXPOSURE: confirm=true + `warning` field the agent must surface |
+| `firewall_rule_add` / `firewall_rule_remove` | `environment/security/rest/addrule` / `removerule` | container firewall rules; same `warning` requirement |
+| `file_list` / `file_read` | `environment/file/rest/getlist` / `read` | traversal refused; read is size-capped (64 KB head) and text-only |
+| `file_upload` / `file_edit` | `upload` / `write` / `replaceinbody` | content base64 (256 KB decoded cap); content masked, never echoed in results |
+| `trigger_list` / `trigger_create` / `trigger_delete` | `environment/trigger/rest/gettriggers` / `addtrigger` / `deletetrigger` | auto horizontal scaling triggers (scale up/down thresholds) |
+| `task_list` / `task_create` / `task_delete` | `utils/scheduler/rest/gettasks` / `createenvtask` / `deletetasks` | cron task scheduler (validated 5-field cron) |
+| `env_share` / `env_share_list` | `users/collaboration/rest/invitemember` / `getmembers` | share with a teammate; role enum admin/user/viewer |
+| `usage_list` | `billing/account/rest/getextendedaccountbillinghistorybyperiod` | billing usage history per environment/period |
+
+Method names come from the 310-method catalog
+(`~/workspace/files/jelastic-complete-guide.md`): where the section 4.x curl
+blocks disagree with the section-5 per-service method lists (files,
+firewall, scheduler, triggers), the section-5 lists are the wire contract,
+and the alternatives are noted in `mcp/jelastic_client.py`.
 
 Known platform behaviors baked into the client: async ops (never conclude
 failure from a timeout), `deleteenv` needs `password`, session expiry,

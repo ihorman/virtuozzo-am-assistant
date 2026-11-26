@@ -23,6 +23,7 @@ from mock.codes import (
     MANIFEST_CORRUPTED,
     NODE_NOT_FOUND,
     OK,
+    PORT_CONFLICT,
     SESSION_INVALID,
     STATUS_CREATING,
 )
@@ -585,3 +586,294 @@ def test_unknown_method_returns_result_envelope(raw, state):
 
 def test_healthz(raw):
     assert raw.get("/healthz").json()["status"] == "ok"
+
+
+# --- T13 coverage endpoints: faithful shapes + failure modes ----------------
+
+
+def make_env_raw2(raw, session, name):
+    return create_env_raw(raw, session, name=name)
+
+
+def test_bindextdomain_and_taken_is_2314(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="dom-a")
+    create_env_raw(raw, session, name="dom-b")
+    body = raw.post(API + "environment/binder/rest/bindextdomain", data={
+        "session": session, "envName": "dom-a",
+        "extDomain": "app.example.com"}).json()
+    assert body["result"] == OK
+    assert body["extDomain"] == "app.example.com"
+    # taken by another environment -> 2314 domain not available
+    body = raw.post(API + "environment/binder/rest/bindextdomain", data={
+        "session": session, "envName": "dom-b",
+        "extDomain": "app.example.com"}).json()
+    assert body["result"] == DOMAIN_UNAVAILABLE
+    # unbind (exact catalog name: removeextdomain) and re-bind elsewhere
+    body = raw.post(API + "environment/binder/rest/removeextdomain", data={
+        "session": session, "envName": "dom-a",
+        "extDomain": "app.example.com"}).json()
+    assert body["result"] == OK
+    body = raw.post(API + "environment/binder/rest/removeextdomain", data={
+        "session": session, "envName": "dom-a",
+        "extDomain": "app.example.com"}).json()
+    assert body["result"] == INVALID_PARAMETER  # not bound anymore
+    body = raw.post(API + "environment/binder/rest/bindextdomain", data={
+        "session": session, "envName": "dom-b",
+        "extDomain": "app.example.com"}).json()
+    assert body["result"] == OK
+
+
+def test_cloneenv_roundtrip_and_dst_taken(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="clone-src")
+    body = raw.post(API + "environment/control/rest/cloneenv", data={
+        "session": session, "srcEnvName": "clone-src",
+        "dstEnvName": "clone-dst"}).json()
+    assert body["result"] == OK
+    assert body["envName"] == "clone-dst"
+    assert body["statusName"] == "creating"
+    wait_status_raw(raw, session, "clone-dst", "running")
+    info = raw.get(API + "environment/control/rest/getenvinfo",
+                   params={"session": session,
+                           "envName": "clone-dst"}).json()
+    assert len(info["nodes"]) == 1
+    # dst name taken -> 2314
+    body = raw.post(API + "environment/control/rest/cloneenv", data={
+        "session": session, "srcEnvName": "clone-src",
+        "dstEnvName": "clone-dst"}).json()
+    assert body["result"] == DOMAIN_UNAVAILABLE
+    # bad dst name -> invalid parameter
+    body = raw.post(API + "environment/control/rest/cloneenv", data={
+        "session": session, "srcEnvName": "clone-src",
+        "dstEnvName": "BAD NAME"}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_restartnodes_and_unknown_node_is_2025(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="restart-env")
+    wait_status_raw(raw, session, "restart-env", "running")
+    info = raw.get(API + "environment/control/rest/getenvinfo",
+                   params={"session": session,
+                           "envName": "restart-env"}).json()
+    node_id = info["nodes"][0]["id"]
+    body = raw.post(API + "environment/control/rest/restartnodes", data={
+        "session": session, "envName": "restart-env"}).json()
+    assert body["result"] == OK
+    assert body["nodes"][0]["status"] == "updating"
+    body = raw.post(API + "environment/control/rest/restartnodebyid", data={
+        "session": session, "envName": "restart-env",
+        "nodeId": node_id}).json()
+    assert body["result"] == OK
+    body = raw.post(API + "environment/control/rest/restartnodebyid", data={
+        "session": session, "envName": "restart-env",
+        "nodeId": 999999}).json()
+    assert body["result"] == NODE_NOT_FOUND
+
+
+def test_endpoints_add_remove_and_port_conflict_is_2027(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="ep-env")
+    wait_status_raw(raw, session, "ep-env", "running")
+    info = raw.get(API + "environment/control/rest/getenvinfo",
+                   params={"session": session, "envName": "ep-env"}).json()
+    node_id = info["nodes"][0]["id"]
+    body = raw.post(API + "environment/control/rest/addendpoint", data={
+        "session": session, "envName": "ep-env", "nodeId": node_id,
+        "name": "SSH", "privatePort": 22, "protocol": "TCP"}).json()
+    assert body["result"] == OK
+    assert body["endpoint"]["privatePort"] == 22
+    assert body["endpoint"]["publicPort"] >= 10000
+    # same node/port/protocol again -> 2027 port conflict (mock-defined)
+    body = raw.post(API + "environment/control/rest/addendpoint", data={
+        "session": session, "envName": "ep-env", "nodeId": node_id,
+        "name": "SSH-again", "privatePort": 22, "protocol": "TCP"}).json()
+    assert body["result"] == PORT_CONFLICT
+    listing = raw.get(API + "environment/control/rest/getendpoints",
+                      params={"session": session, "envName": "ep-env"}).json()
+    assert len(listing["array"]) == 1
+    endpoint_id = listing["array"][0]["id"]
+    body = raw.post(API + "environment/control/rest/removeendpoint", data={
+        "session": session, "envName": "ep-env", "id": endpoint_id}).json()
+    assert body["result"] == OK
+    body = raw.post(API + "environment/control/rest/removeendpoint", data={
+        "session": session, "envName": "ep-env", "id": endpoint_id}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_firewall_rules_add_remove_and_bad_action(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="fw-env")
+    wait_status_raw(raw, session, "fw-env", "running")
+    info = raw.get(API + "environment/control/rest/getenvinfo",
+                   params={"session": session, "envName": "fw-env"}).json()
+    node_id = info["nodes"][0]["id"]
+    body = raw.post(API + "environment/security/rest/addrule", data={
+        "session": session, "envName": "fw-env", "nodeId": node_id,
+        "protocol": "TCP", "ports": "80", "src": "0.0.0.0/0",
+        "action": "ACCEPT", "priority": 1}).json()
+    assert body["result"] == OK
+    assert body["rule"]["action"] == "ACCEPT"
+    # bad action -> invalid parameter (the named failure mode)
+    body = raw.post(API + "environment/security/rest/addrule", data={
+        "session": session, "envName": "fw-env", "nodeId": node_id,
+        "protocol": "TCP", "ports": "443", "src": "0.0.0.0/0",
+        "action": "ALLOW", "priority": 1}).json()
+    assert body["result"] == INVALID_PARAMETER
+    rules = raw.get(API + "environment/security/rest/getrules",
+                    params={"session": session, "envName": "fw-env",
+                            "nodeId": node_id}).json()
+    assert len(rules["array"]) == 1
+    body = raw.post(API + "environment/security/rest/removerule", data={
+        "session": session, "envName": "fw-env",
+        "id": rules["array"][0]["id"]}).json()
+    assert body["result"] == OK
+    body = raw.post(API + "environment/security/rest/removerule", data={
+        "session": session, "envName": "fw-env", "id": 424242}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_file_getlist_read_upload_and_traversal_refused(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="file-env")
+    wait_status_raw(raw, session, "file-env", "running")
+    info = raw.get(API + "environment/control/rest/getenvinfo",
+                   params={"session": session, "envName": "file-env"}).json()
+    node_id = info["nodes"][0]["id"]
+    listing = raw.get(API + "environment/file/rest/getlist", params={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/var/www/webroot/ROOT"}).json()
+    assert listing["result"] == OK
+    assert listing["array"][0]["name"] == "index.html"
+    assert listing["array"][0]["type"] == "FILE"
+    body = raw.post(API + "environment/file/rest/read", data={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/var/www/webroot/ROOT/index.html"}).json()
+    assert body["result"] == OK
+    assert "hello from file-env" in body["body"]
+    body = raw.post(API + "environment/file/rest/upload", data={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/var/www/webroot/ROOT/new.txt", "body": "fresh"}).json()
+    assert body["result"] == OK and body["size"] == 5
+    body = raw.post(API + "environment/file/rest/replaceinbody", data={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/var/www/webroot/ROOT/new.txt", "search": "fresh",
+        "replace": "stale"}).json()
+    assert body["result"] == OK and body["replacements"] == 1
+    # traversal refused at the platform boundary too
+    body = raw.get(API + "environment/file/rest/getlist", params={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/var/../../etc"}).json()
+    assert body["result"] == INVALID_PARAMETER
+    body = raw.post(API + "environment/file/rest/read", data={
+        "session": session, "envName": "file-env", "nodeId": node_id,
+        "path": "/nope/missing.txt"}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_triggers_add_delete_and_bad_metric(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="tr-env")
+    wait_status_raw(raw, session, "tr-env", "running")
+    body = raw.post(API + "environment/trigger/rest/addtrigger", data={
+        "session": session, "envName": "tr-env", "nodeGroup": "cp",
+        "type": "CPU", "condition": ">", "value": 70, "period": 5,
+        "amount": 1, "action": "ADD"}).json()
+    assert body["result"] == OK
+    assert body["trigger"]["action"] == "ADD"
+    # bad metric type -> invalid parameter (failure mode)
+    body = raw.post(API + "environment/trigger/rest/addtrigger", data={
+        "session": session, "envName": "tr-env", "nodeGroup": "cp",
+        "type": "LOAD", "condition": ">", "value": 70, "period": 5,
+        "amount": 1, "action": "ADD"}).json()
+    assert body["result"] == INVALID_PARAMETER
+    triggers = raw.get(API + "environment/trigger/rest/gettriggers",
+                       params={"session": session,
+                               "envName": "tr-env"}).json()
+    assert len(triggers["array"]) == 1
+    body = raw.post(API + "environment/trigger/rest/deletetrigger", data={
+        "session": session, "envName": "tr-env",
+        "id": triggers["array"][0]["id"]}).json()
+    assert body["result"] == OK
+    body = raw.post(API + "environment/trigger/rest/deletetrigger", data={
+        "session": session, "envName": "tr-env", "id": 987654}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_scheduler_tasks_and_bad_cron(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="task-env")
+    wait_status_raw(raw, session, "task-env", "running")
+    body = raw.post(API + "utils/scheduler/rest/createenvtask", data={
+        "session": session, "envName": "task-env", "cron": "0 2 * * *",
+        "command": "/opt/backup.sh"}).json()
+    assert body["result"] == OK
+    assert body["task"]["cron"] == "0 2 * * *"
+    # bad cron -> invalid parameter (failure mode)
+    body = raw.post(API + "utils/scheduler/rest/createenvtask", data={
+        "session": session, "envName": "task-env", "cron": "99 99 * * *",
+        "command": "/opt/backup.sh"}).json()
+    assert body["result"] == INVALID_PARAMETER
+    tasks = raw.get(API + "utils/scheduler/rest/gettasks",
+                    params={"session": session, "envName": "task-env"}).json()
+    assert len(tasks["array"]) == 1
+    task_id = tasks["array"][0]["id"]
+    body = raw.post(API + "utils/scheduler/rest/deletetasks", data={
+        "session": session, "envName": "task-env",
+        "ids": json.dumps([task_id])}).json()
+    assert body["result"] == OK and body["removed"] == [task_id]
+    body = raw.post(API + "utils/scheduler/rest/deletetasks", data={
+        "session": session, "envName": "task-env",
+        "ids": json.dumps([task_id])}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_invitemember_and_bad_role(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="share-env")
+    body = raw.post(API + "users/collaboration/rest/invitemember", data={
+        "session": session, "envName": "share-env",
+        "email": "teammate@example.com", "role": "viewer"}).json()
+    assert body["result"] == OK
+    assert body["member"]["role"] == "viewer"
+    assert body["member"]["status"] == "invited"
+    # bad role -> invalid parameter (the named failure mode)
+    body = raw.post(API + "users/collaboration/rest/invitemember", data={
+        "session": session, "envName": "share-env",
+        "email": "other@example.com", "role": "root"}).json()
+    assert body["result"] == INVALID_PARAMETER
+    # bad email -> invalid parameter
+    body = raw.post(API + "users/collaboration/rest/invitemember", data={
+        "session": session, "envName": "share-env",
+        "email": "not-an-email", "role": "admin"}).json()
+    assert body["result"] == INVALID_PARAMETER
+    members = raw.get(API + "users/collaboration/rest/getmembers",
+                      params={"session": session,
+                              "envName": "share-env"}).json()
+    assert len(members["array"]) == 1
+    # inviting the same address twice -> invalid parameter
+    body = raw.post(API + "users/collaboration/rest/invitemember", data={
+        "session": session, "envName": "share-env",
+        "email": "teammate@example.com", "role": "admin"}).json()
+    assert body["result"] == INVALID_PARAMETER
+
+
+def test_billing_history_rows_shape(raw, state):
+    session = signin_raw(raw, state)
+    create_env_raw(raw, session, name="bill-env")
+    wait_status_raw(raw, session, "bill-env", "running")
+    body = raw.get(
+        API + "billing/account/rest/getextendedaccountbillinghistorybyperiod",
+        params={"session": session}).json()
+    assert body["result"] == OK
+    assert len(body["array"]) == 1
+    row = body["array"][0]
+    assert row["envName"] == "bill-env"
+    assert row["cloudlets"] == 8 and row["cost"] > 0
+    assert body["total"] == row["cost"]
+    # bad startTime -> invalid parameter (failure mode)
+    body = raw.get(
+        API + "billing/account/rest/getextendedaccountbillinghistorybyperiod",
+        params={"session": session, "startTime": "yesterday"}).json()
+    assert body["result"] == INVALID_PARAMETER

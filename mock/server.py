@@ -175,6 +175,114 @@ def create_app(state: Optional[MockJelastic] = None) -> FastAPI:
             return _envelope(*st.bindssl(
                 p.get("session"), p.get("envName"), p.get("extDomain")))
 
+        # T13 coverage endpoints (sections 4.6-4.15 of the method catalog).
+        # Domains: bindextdomain / removeextdomain (the catalog has no
+        # "unbindextdomain" - removeextdomain is the exact name).
+        if method == "environment/binder/rest/bindextdomain":
+            return _envelope(*st.bindextdomain(
+                p.get("session"), p.get("envName"), p.get("extDomain")))
+        if method == "environment/binder/rest/removeextdomain":
+            return _envelope(*st.removeextdomain(
+                p.get("session"), p.get("envName"), p.get("extDomain")))
+
+        # Clone / restart.
+        if method == "environment/control/rest/cloneenv":
+            return _envelope(*st.cloneenv(
+                p.get("session"), p.get("srcEnvName"), p.get("dstEnvName")))
+        if method == "environment/control/rest/restartnodes":
+            return _envelope(*st.restartnodes(
+                p.get("session"), p.get("envName"), p.get("nodeGroup")))
+        if method == "environment/control/rest/restartnodebyid":
+            return _envelope(*st.restartnodebyid(
+                p.get("session"), p.get("envName"), p.get("nodeId")))
+
+        # Ports & endpoints.
+        if method == "environment/control/rest/getendpoints":
+            return _envelope(*st.getendpoints(
+                p.get("session"), p.get("envName")))
+        if method == "environment/control/rest/addendpoint":
+            return _envelope(*st.addendpoint(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("name"), p.get("privatePort"), p.get("protocol")))
+        if method == "environment/control/rest/removeendpoint":
+            return _envelope(*st.removeendpoint(
+                p.get("session"), p.get("envName"), p.get("id")))
+
+        # Container firewall (environment/security/rest/*).
+        if method == "environment/security/rest/getrules":
+            return _envelope(*st.getrules(
+                p.get("session"), p.get("envName"), p.get("nodeId")))
+        if method == "environment/security/rest/addrule":
+            return _envelope(*st.addrule(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("protocol"), p.get("ports"), p.get("src"),
+                p.get("action"), p.get("priority")))
+        if method == "environment/security/rest/removerule":
+            return _envelope(*st.removerule(
+                p.get("session"), p.get("envName"), p.get("id")))
+
+        # File manager (environment/file/rest/*).
+        if method == "environment/file/rest/getlist":
+            return _envelope(*st.getlist(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path")))
+        if method == "environment/file/rest/read":
+            return _envelope(*st.read(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path")))
+        if method == "environment/file/rest/upload":
+            return _envelope(*st.upload(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path"), p.get("body")))
+        if method == "environment/file/rest/write":
+            return _envelope(*st.write(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path"), p.get("body")))
+        if method == "environment/file/rest/replaceinbody":
+            return _envelope(*st.replaceinbody(
+                p.get("session"), p.get("envName"), p.get("nodeId"),
+                p.get("path"), p.get("search"), p.get("replace")))
+
+        # Autoscaling triggers (environment/trigger/rest/*).
+        if method == "environment/trigger/rest/gettriggers":
+            return _envelope(*st.gettriggers(
+                p.get("session"), p.get("envName")))
+        if method == "environment/trigger/rest/addtrigger":
+            return _envelope(*st.addtrigger(
+                p.get("session"), p.get("envName"), p.get("nodeGroup"),
+                p.get("type"), p.get("condition"), p.get("value"),
+                p.get("period"), p.get("amount"), p.get("action")))
+        if method == "environment/trigger/rest/deletetrigger":
+            return _envelope(*st.deletetrigger(
+                p.get("session"), p.get("envName"), p.get("id")))
+
+        # Task scheduler (utils/scheduler/rest/*).
+        if method == "utils/scheduler/rest/gettasks":
+            return _envelope(*st.gettasks(
+                p.get("session"), p.get("envName")))
+        if method == "utils/scheduler/rest/createenvtask":
+            return _envelope(*st.createenvtask(
+                p.get("session"), p.get("envName"), p.get("cron"),
+                p.get("command")))
+        if method == "utils/scheduler/rest/deletetasks":
+            return _envelope(*st.deletetasks(
+                p.get("session"), p.get("envName"), p.get("ids")))
+
+        # Collaboration (users/collaboration/rest/*).
+        if method == "users/collaboration/rest/invitemember":
+            return _envelope(*st.invitemember(
+                p.get("session"), p.get("envName"), p.get("email"),
+                p.get("role")))
+        if method == "users/collaboration/rest/getmembers":
+            return _envelope(*st.getmembers(
+                p.get("session"), p.get("envName")))
+
+        # Billing history (billing/account/rest/*).
+        if method == ("billing/account/rest/"
+                      "getextendedaccountbillinghistorybyperiod"):
+            return _envelope(*st.getextendedaccountbillinghistorybyperiod(
+                p.get("session"), p.get("startTime"), p.get("endTime")))
+
         return _envelope(1, {"error": f"unknown method [{method}]"})
 
     @app.api_route(API_PREFIX + "{path:path}", methods=["GET", "POST"])

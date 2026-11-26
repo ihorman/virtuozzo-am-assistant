@@ -30,6 +30,7 @@ MANIFEST_CORRUPTED = 11001        # JPS manifest YAML corrupted / not parsed
 
 # --- Result codes (mock-defined) -------------------------------------------
 NODE_NOT_FOUND = 2025             # mock-defined: node does not exist
+PORT_CONFLICT = 2027              # mock-defined: endpoint port already exposed
 
 # Session problems the client must treat as "re-authenticate".
 SESSION_CODES = (SESSION_INVALID, SESSION_EXPIRED_LEGACY)

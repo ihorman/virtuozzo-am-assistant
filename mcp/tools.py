@@ -39,6 +39,7 @@ from .jelastic_client import (
     NodeNotFoundError,
     OperationFailedError,
     OperationTimeout,
+    PortConflictError,
     RedirectBlockedError,
     SessionExpiredError,
 )
@@ -261,6 +262,67 @@ APP_PORT = {"type": "integer", "minimum": 1, "maximum": 65535,
             "description": "App listen port (also exported as PORT; the app "
                            "must bind 0.0.0.0). Default: the detected "
                            "language/framework convention."}
+
+# --- T13 coverage parameter shapes -----------------------------------------
+# Every pattern is anchored (docs/SECURITY.md mitigation 4) and re-checked in
+# the handlers where semantics cannot be expressed as a regex.
+
+NODE_ID = {"type": "integer", "minimum": 1, "maximum": 10000000,
+           "description": "Node id from env_info."}
+ENTITY_ID = {"type": "integer", "minimum": 1, "maximum": 10000000,
+             "description": "Numeric id of the target record (endpoint, "
+                            "firewall rule, trigger or task)."}
+PORT = {"type": "integer", "minimum": 1, "maximum": 65535,
+        "description": "TCP/UDP port number."}
+PROTOCOL = {"type": "string", "enum": ["TCP", "UDP", "tcp", "udp"],
+            "description": "Protocol: TCP or UDP."}
+DIRECTION = {"type": "string", "enum": ["ACCEPT", "DROP", "accept", "drop"],
+             "description": "Firewall rule action (the platform's rule "
+                            "'action'): ACCEPT allows the traffic, DROP "
+                            "blocks it."}
+SUBNET = {"type": "string", "maxLength": 18,
+          "pattern": r"^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$",
+          "description": "Source IPv4 subnet (CIDR), e.g. '0.0.0.0/0' "
+                         "(the whole Internet) or '203.0.113.5/32'."}
+FILE_PATH = {"type": "string", "maxLength": 256,
+             "pattern": r"^/[A-Za-z0-9._/+-]*$",
+             "description": "Absolute file path inside the node, e.g. "
+                            "'/var/www/webroot/ROOT/index.html'. Traversal "
+                            "segments ('..') are refused."}
+FILE_CONTENT = {"type": "string", "maxLength": 524288,
+                "description": "Base64 of the UTF-8 text file content "
+                               "(decoded size cap 256 KB). The content is "
+                               "never echoed back in results."}
+FILE_TEXT = {"type": "string", "maxLength": 65536,
+             "description": "Text to write (max 64 KB). Never echoed back "
+                            "in results."}
+FILE_FIND = {"type": "string", "maxLength": 4096,
+             "description": "Text to find (find/replace mode)."}
+METRIC = {"type": "string",
+          "enum": ["CPU", "RAM", "DISK", "NET", "REQUESTS"],
+          "description": "Scaling metric: CPU, RAM, DISK, NET or REQUESTS."}
+THRESHOLD = {"type": "number", "minimum": 0, "maximum": 100,
+             "description": "Metric percent threshold (0-100)."}
+CRON = {"type": "string", "maxLength": 64,
+        "pattern": r"^[0-9*/, \-]+$",
+        "description": "Five-field cron expression (minute hour day-of-month "
+                       "month day-of-week), e.g. '0 2 * * *'."}
+COMMAND = {"type": "string", "maxLength": 256,
+           "pattern": r"^[A-Za-z0-9 ._/:,@%+=,-]+$",
+           "description": "What the scheduled task runs, e.g. "
+                          "'restart' or '/opt/backup.sh'."}
+EMAIL = {"type": "string", "maxLength": 254,
+         "pattern": r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
+         "description": "Teammate's account email."}
+ROLE = {"type": "string", "enum": ["admin", "user", "viewer"],
+        "description": "Access role: admin (full control), user (deploy and "
+                       "manage), viewer (read-only)."}
+TIME_POINT = {"type": "string", "maxLength": 32,
+              "pattern": r"^([0-9]{4}-[0-9]{2}-[0-9]{2}"
+                         r"([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?Z?)?"
+                         r"|[0-9]{1,13})$",
+              "description": "Date/time: 'YYYY-MM-DD' (ISO date) or epoch "
+                             "seconds."}
 
 _CONFIRM_NOTE = ("Changes the platform state. Requires confirm=true after "
                  "explicit user confirmation.")
@@ -601,6 +663,437 @@ async def _h_op_result(client: JelasticClient, args: dict) -> dict:
                 "message": str(exc), "observed": exc.observed}
     return {"status": "done", "op": op, "env_name": env_name,
             "observed": observed}
+
+
+# --- T13 coverage handlers (domains, clone, restart, endpoints, firewall,
+#     files, triggers, scheduler, share, usage) ------------------------------
+
+FILE_READ_MAX_BYTES = 64 * 1024      # file_read is size-capped and text-only
+FILE_UPLOAD_MAX_BYTES = 256 * 1024   # decoded content_b64 cap
+
+_CRON_FIELD_RE = re.compile(
+    r"^(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?(,(\*|\d{1,2}(-\d{1,2})?)(/\d{1,2})?)*$")
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _check_file_path(path: str) -> str:
+    """Absolute normalized path only - traversal is refused before any call."""
+    if not path.startswith("/") or "\x00" in path or "//" in path:
+        raise ToolInputError(
+            "argument [path] must be an absolute normalized path")
+    if any(seg == ".." for seg in path.split("/")):
+        raise ToolInputError(
+            "argument [path] must not contain '..' traversal segments")
+    return path
+
+
+def _check_cron(cron: str) -> str:
+    """Five-field cron with per-field range checks (minute..day-of-week)."""
+    fields = cron.split()
+    if len(fields) != 5:
+        raise ToolInputError(
+            "argument [cron] must have exactly 5 fields "
+            "(minute hour day-of-month month day-of-week)")
+    for crontab_field, (lo, hi) in zip(fields, _CRON_RANGES):
+        if _CRON_FIELD_RE.fullmatch(crontab_field) is None:
+            raise ToolInputError("argument [cron] has an invalid field")
+        for part in crontab_field.split(","):
+            base, _, step = part.partition("/")
+            if step and (not step.isdigit() or int(step) < 1):
+                raise ToolInputError("argument [cron] has an invalid step")
+            if base == "*":
+                continue
+            try:
+                values = [int(n) for n in base.split("-")]
+            except ValueError:
+                raise ToolInputError("argument [cron] has an invalid field")
+            if any(v < lo or v > hi for v in values) or (
+                    len(values) == 2 and values[0] > values[1]):
+                raise ToolInputError(
+                    f"argument [cron] field [{crontab_field}] is out of "
+                    f"range [{lo}-{hi}]")
+    return cron
+
+
+def _check_subnet(value: str) -> str:
+    """IPv4 CIDR subnet with real octet/prefix checks."""
+    import ipaddress
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ToolInputError(
+            f"argument [subnet] is not a valid IPv4 CIDR: {value}") from exc
+    if ":" in value:
+        raise ToolInputError("argument [subnet] must be an IPv4 CIDR")
+    return value
+
+
+def _check_number(args: dict, name: str) -> float:
+    value = args.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolInputError(f"argument [{name}] must be a number")
+    return float(value)
+
+
+def _exposure_warning(protocol: str, port: int, node_id: int) -> str:
+    return (f"INTERNET EXPOSURE: this opens {protocol}/{port} on node "
+            f"[{node_id}] to the ENTIRE INTERNET (0.0.0.0/0). Anyone can "
+            f"reach that port. Only proceed if the service is meant to be "
+            f"public and is itself authenticated; close it with "
+            f"endpoint_close when it is no longer needed.")
+
+
+def _endpoint_close_warning(protocol: str, port: int, node_id: int) -> str:
+    return (f"SERVICE INTERRUPTION: closing {protocol}/{port} on node "
+            f"[{node_id}] cuts off every external client using it. Traffic "
+            f"already flowing through the endpoint will drop.")
+
+
+def _firewall_warning(action: str, protocol: str, port: int, subnet: str,
+                      node_id: int) -> str:
+    verb = ("ALLOWS" if action == "ACCEPT" else "BLOCKS")
+    exposure = ""
+    if action == "ACCEPT" and subnet == "0.0.0.0/0":
+        exposure = (" This exposes the port to the ENTIRE INTERNET "
+                    "(0.0.0.0/0).")
+    return (f"FIREWALL CHANGE: this rule {verb} {protocol}/{port} from "
+            f"{subnet} on node [{node_id}].{exposure} A wrong rule can lock "
+            f"you out or expose a service; verify before confirming.")
+
+
+def _firewall_remove_warning(rule_id: int, node_id: int) -> str:
+    return (f"FIREWALL CHANGE: removing rule [{rule_id}] changes what "
+            f"traffic reaches node [{node_id}] - traffic previously blocked "
+            f"may become reachable (or allowed traffic may drop).")
+
+
+def _file_result(env_name: str, path: str, result: dict, *, mode: str) -> dict:
+    """Mutation summary - content is masked, never echoed (like secrets)."""
+    return {"env_name": env_name, "path": path, "mode": mode,
+            "size_bytes": result.get("size"), "content": security.MASK,
+            "detail": f"file [{path}] {mode} applied; content is masked and "
+                      f"never echoed back"}
+
+
+async def _h_domain_bind(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    ext_domain = _req_str(args, "ext_domain").lower()
+    await client.bind_ext_domain(env_name, ext_domain)
+    out = {"env_name": env_name, "ext_domain": ext_domain, "bound": True,
+           "ssl": None}
+    if args.get("ssl") is True:
+        await client.bind_ssl(env_name, ext_domain)
+        out["ssl"] = {"issuer": "Let's Encrypt", "status": "issued"}
+    out["detail"] = (f"domain [{ext_domain}] is bound to [{env_name}]"
+                     + (" with a Let's Encrypt certificate" if out["ssl"]
+                        else "") + ("; DNS must point the domain at the "
+                                    "platform for it to resolve"))
+    return out
+
+
+async def _h_domain_unbind(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    ext_domain = _req_str(args, "ext_domain").lower()
+    await client.unbind_ext_domain(env_name, ext_domain)
+    return {"env_name": env_name, "ext_domain": ext_domain, "bound": False,
+            "detail": f"domain [{ext_domain}] unbound from [{env_name}]"}
+
+
+async def _h_env_clone(client: JelasticClient, args: dict) -> dict:
+    src = _req_str(args, "env_name")
+    dst = _req_str(args, "new_name")
+    result = await client.clone_env(src, dst)
+    result["detail"] = (f"clone of [{src}] accepted as [{dst}] "
+                        f"(asynchronous); poll with op_result(env_name="
+                        f"'{dst}', op='status')")
+    return result
+
+
+async def _h_env_restart(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    result = await client.restart_env(env_name)
+    result["detail"] = ("environment restart requested (all node groups); "
+                        "services are briefly unavailable")
+    return result
+
+
+async def _h_node_restart(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_id = _req_int(args, "node_id")
+    result = await client.restart_node(env_name, node_id)
+    result["detail"] = (f"restart requested for node [{node_id}]; the node "
+                        f"is briefly unavailable")
+    return result
+
+
+async def _h_endpoint_open(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_id = _req_int(args, "node_id")
+    port = _req_int(args, "port")
+    protocol = _req_str(args, "protocol").upper()
+    result = await client.add_endpoint(env_name, node_id,
+                                       f"{protocol}-{port}", port, protocol)
+    return {"env_name": env_name,
+            "endpoint": result.get("endpoint") or result,
+            "warning": _exposure_warning(protocol, port, node_id),
+            "detail": (f"{protocol}/{port} on node [{node_id}] is now "
+                       f"reachable from the Internet")}
+
+
+async def _h_endpoint_close(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_id = _req_int(args, "node_id")
+    port = _req_int(args, "port")
+    protocol = _req_str(args, "protocol").upper()
+    endpoints = await client.get_endpoints(env_name)
+    match = next((e for e in endpoints
+                  if int(e.get("nodeId") or 0) == node_id
+                  and int(e.get("privatePort") or 0) == port
+                  and str(e.get("protocol") or "").upper() == protocol), None)
+    if match is None or match.get("id") is None:
+        raise ToolInputError(
+            f"no {protocol}/{port} endpoint found on node [{node_id}] of "
+            f"[{env_name}]")
+    await client.remove_endpoint(env_name, int(match["id"]))
+    return {"env_name": env_name, "endpoint_id": match["id"],
+            "node_id": node_id, "port": port, "protocol": protocol,
+            "warning": _endpoint_close_warning(protocol, port, node_id),
+            "detail": f"{protocol}/{port} on node [{node_id}] is closed"}
+
+
+async def _h_firewall_rule_add(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_id = _req_int(args, "node_id")
+    direction = _req_str(args, "direction").upper()
+    protocol = _req_str(args, "protocol").upper()
+    port = _req_int(args, "port")
+    subnet = _check_subnet(_req_str(args, "subnet"))
+    result = await client.add_firewall_rule(
+        env_name, node_id, protocol=protocol, ports=str(port), src=subnet,
+        action=direction)
+    return {"env_name": env_name,
+            "rule": result.get("rule") or result,
+            "warning": _firewall_warning(direction, protocol, port, subnet,
+                                         node_id),
+            "detail": (f"firewall rule [{direction} {protocol}/{port} from "
+                       f"{subnet}] added on node [{node_id}]" )}
+
+
+async def _h_firewall_rule_remove(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_id = _req_int(args, "node_id")
+    direction = _req_str(args, "direction").upper()
+    protocol = _req_str(args, "protocol").upper()
+    port = _req_int(args, "port")
+    subnet = _check_subnet(_req_str(args, "subnet"))
+    rules = await client.get_firewall_rules(env_name, node_id)
+    match = next((r for r in rules
+                  if int(r.get("nodeId") or 0) == node_id
+                  and str(r.get("protocol") or "").upper() == protocol
+                  and str(r.get("ports") or "") == str(port)
+                  and str(r.get("src") or "") == subnet
+                  and str(r.get("action") or "").upper() == direction), None)
+    if match is None or match.get("id") is None:
+        raise ToolInputError(
+            f"no [{direction} {protocol}/{port} from {subnet}] rule found on "
+            f"node [{node_id}] of [{env_name}]")
+    rule_id = int(match["id"])
+    await client.remove_firewall_rule(env_name, rule_id)
+    return {"env_name": env_name, "rule_id": rule_id, "node_id": node_id,
+            "warning": _firewall_remove_warning(rule_id, node_id),
+            "detail": f"firewall rule [{rule_id}] removed from node "
+                      f"[{node_id}]"}
+
+
+async def _h_file_list(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    path = _check_file_path(_req_str(args, "path"))
+    entries = await client.file_list(env_name, path,
+                                     node_id=_opt_int(args, "node_id"))
+    return {"env_name": env_name, "path": path, "entries": entries,
+            "count": len(entries)}
+
+
+async def _h_file_read(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    path = _check_file_path(_req_str(args, "path"))
+    result = await client.file_read(env_name, path,
+                                    node_id=_opt_int(args, "node_id"))
+    body = result.get("body") or ""
+    if "\x00" in body:
+        raise ToolInputError(
+            f"file [{path}] is not text (binary content); only text files "
+            f"can be read")
+    raw = body.encode("utf-8")
+    truncated = len(raw) > FILE_READ_MAX_BYTES
+    if truncated:
+        body = raw[:FILE_READ_MAX_BYTES].decode("utf-8", errors="replace")
+    return {"env_name": env_name, "path": path, "size": result.get("size"),
+            "truncated": truncated, "bytes_read": min(len(raw),
+                                                      FILE_READ_MAX_BYTES),
+            "body": _frame_logs_value(body, "body")}
+
+
+async def _h_file_upload(client: JelasticClient, args: dict) -> dict:
+    import base64
+    import binascii
+    env_name = _req_str(args, "env_name")
+    path = _check_file_path(_req_str(args, "path"))
+    encoded = _req_str(args, "content_b64")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ToolInputError(
+            "argument [content_b64] is not valid base64") from exc
+    if len(raw) > FILE_UPLOAD_MAX_BYTES:
+        raise ToolInputError(
+            f"decoded content exceeds the "
+            f"{FILE_UPLOAD_MAX_BYTES // 1024} KB cap")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ToolInputError(
+            "only UTF-8 text content is supported") from exc
+    result = await client.file_upload(env_name, path, text,
+                                      node_id=_opt_int(args, "node_id"))
+    return _file_result(env_name, path, result, mode="upload")
+
+
+async def _h_file_edit(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    path = _check_file_path(_req_str(args, "path"))
+    node_id = _opt_int(args, "node_id")
+    find = args.get("find")
+    replace = args.get("replace")
+    content = args.get("content")
+    if content is not None:
+        if find is not None or replace is not None:
+            raise ToolInputError(
+                "pass either [content] or [find]/[replace], not both")
+        if not isinstance(content, str):
+            raise ToolInputError("argument [content] must be a string")
+        result = await client.file_write(env_name, path, content,
+                                         node_id=node_id)
+        return _file_result(env_name, path, result, mode="write")
+    if find is None:
+        raise ToolInputError(
+            "file_edit requires either [content] (full replacement) or "
+            "[find] + [replace]")
+    if not isinstance(find, str) or not find:
+        raise ToolInputError("argument [find] must be a non-empty string")
+    if replace is not None and not isinstance(replace, str):
+        raise ToolInputError("argument [replace] must be a string")
+    result = await client.file_replace(env_name, path, find, replace or "",
+                                       node_id=node_id)
+    return {"env_name": env_name, "path": path, "mode": "replace",
+            "replacements": result.get("replacements"),
+            "size_bytes": result.get("size"), "content": security.MASK,
+            "detail": f"file [{path}]: {result.get('replacements')} "
+                      f"replacement(s) applied; content is masked and never "
+                      f"echoed back"}
+
+
+async def _h_trigger_list(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    triggers = await client.get_triggers(env_name)
+    return {"env_name": env_name, "triggers": triggers,
+            "count": len(triggers)}
+
+
+async def _h_trigger_create(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    node_group = _opt_str(args, "node_group") or "cp"
+    metric = _req_str(args, "metric").upper()
+    scale_up = _check_number(args, "scale_up_threshold")
+    scale_down = args.get("scale_down_threshold")
+    period = _opt_int(args, "period") or 5
+    step = _req_int(args, "step")
+    # Validate everything BEFORE any platform call: a rejected request must
+    # never leave half a trigger pair behind.
+    if scale_down is not None:
+        scale_down = _check_number(args, "scale_down_threshold")
+        if scale_down >= scale_up:
+            raise ToolInputError(
+                "[scale_down_threshold] must be below [scale_up_threshold]")
+    triggers = []
+    up = await client.add_trigger(
+        env_name, node_group, trigger_type=metric, condition=">",
+        value=scale_up, period=period, amount=step, action="ADD")
+    triggers.append(up.get("trigger") or up)
+    detail = (f"when {metric} on [{node_group}] stays above {scale_up}% for "
+              f"{period} min, add {step} node(s)")
+    if scale_down is not None:
+        down = await client.add_trigger(
+            env_name, node_group, trigger_type=metric, condition="<",
+            value=scale_down, period=period, amount=step, action="REMOVE")
+        triggers.append(down.get("trigger") or down)
+        detail += (f"; when {metric} stays below {scale_down}% for {period} "
+                   f"min, remove {step} node(s)")
+    return {"env_name": env_name, "node_group": node_group, "metric": metric,
+            "triggers": triggers, "count": len(triggers),
+            "detail": detail + " (asynchronous; verify with trigger_list)"}
+
+
+async def _h_trigger_delete(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    trigger_id = _req_int(args, "trigger_id")
+    await client.delete_trigger(env_name, trigger_id)
+    return {"env_name": env_name, "trigger_id": trigger_id,
+            "detail": f"autoscaling trigger [{trigger_id}] removed"}
+
+
+async def _h_task_list(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    tasks = await client.get_tasks(env_name)
+    return {"env_name": env_name, "tasks": tasks, "count": len(tasks)}
+
+
+async def _h_task_create(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    cron = _check_cron(_req_str(args, "cron"))
+    action = _req_str(args, "action")
+    result = await client.create_env_task(env_name, cron, action)
+    return {"env_name": env_name, "task": result.get("task") or result,
+            "detail": (f"scheduled task created: [{action}] on cron "
+                       f"[{cron}] (server time); verify with task_list")}
+
+
+async def _h_task_delete(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    task_id = _req_int(args, "task_id")
+    await client.delete_tasks(env_name, [task_id])
+    return {"env_name": env_name, "task_ids": [task_id],
+            "detail": f"scheduled task [{task_id}] removed"}
+
+
+async def _h_env_share(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    email = _req_str(args, "email").lower()
+    role = _req_str(args, "role").lower()
+    result = await client.invite_member(env_name, email, role)
+    return {"env_name": env_name, "member": result.get("member") or result,
+            "detail": (f"invitation sent to [{email}] as [{role}]; the "
+                       f"teammate must accept it before access starts")}
+
+
+async def _h_env_share_list(client: JelasticClient, args: dict) -> dict:
+    env_name = _req_str(args, "env_name")
+    members = await client.get_members(env_name)
+    return {"env_name": env_name, "members": members, "count": len(members)}
+
+
+async def _h_usage_list(client: JelasticClient, args: dict) -> dict:
+    start = _opt_str(args, "start_time")
+    end = _opt_str(args, "end_time")
+    history = await client.get_billing_history(start, end)
+    rows = list(history.get("rows") or [])
+    env_name = _opt_str(args, "env_name")
+    if env_name:
+        rows = [r for r in rows if r.get("envName") == env_name]
+    total = round(sum(float(r.get("cost") or 0) for r in rows), 2)
+    return {"rows": rows, "count": len(rows), "total_cost": total,
+            "start_time": start, "end_time": end,
+            "detail": "usage rows are per environment and period"}
 
 
 # --- deployment source fetching (T12) ---------------------------------------
@@ -1152,6 +1645,227 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
                         "description": "Seconds to wait "
                         "(default 30, capped at 600)."},
         }, ("env_name",), mutating=False), _h_op_result),
+
+    # --- T13 coverage tools -------------------------------------------------
+    ToolSpec(
+        "domain_bind",
+        "Bind a custom external domain to an environment (bindextdomain); "
+        "with ssl=true also issues a Let's Encrypt certificate (bindssl). "
+        "DNS must point the domain at the platform. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "ext_domain": {**DOMAIN, "description": "Custom domain to bind, "
+                           "e.g. 'app.example.com'."},
+            "ssl": {"type": "boolean",
+                    "description": "Also issue a Let's Encrypt certificate "
+                                   "for the domain (default false)."},
+        }, ("env_name", "ext_domain"), mutating=True), _h_domain_bind),
+    ToolSpec(
+        "domain_unbind",
+        "Unbind a custom external domain from an environment "
+        "(removeextdomain). " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "ext_domain": {**DOMAIN, "description": "Bound domain to "
+                           "detach."},
+        }, ("env_name", "ext_domain"), mutating=True), _h_domain_unbind),
+    ToolSpec(
+        "env_clone",
+        "Clone an environment (cloneenv): full copy of the topology, data "
+        "and configuration under a new environment name. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "new_name": {**_ENV_NAME,
+                         "description": "Name of the clone (same name rules "
+                                        "as env_create)."},
+        }, ("env_name", "new_name"), mutating=True), _h_env_clone),
+    ToolSpec(
+        "env_restart",
+        "Restart every node of a running environment (restartnodes). "
+        "Services are briefly unavailable. " + _CONFIRM_NOTE,
+        _schema({"env_name": _ENV_NAME}, ("env_name",), mutating=True),
+        _h_env_restart),
+    ToolSpec(
+        "node_restart",
+        "Restart a single node (restartnodebyid). The node is briefly "
+        "unavailable. " + _CONFIRM_NOTE,
+        _schema({"env_name": _ENV_NAME, "node_id": NODE_ID},
+                ("env_name", "node_id"), mutating=True), _h_node_restart),
+    ToolSpec(
+        "endpoint_open",
+        "Open a public TCP/UDP endpoint (addendpoint): the port becomes "
+        "reachable from the INTERNET. Returns a warning field the agent "
+        "MUST surface to the user. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "node_id": NODE_ID,
+            "port": PORT,
+            "protocol": PROTOCOL,
+        }, ("env_name", "node_id", "port", "protocol"), mutating=True),
+        _h_endpoint_open),
+    ToolSpec(
+        "endpoint_close",
+        "Close a public TCP/UDP endpoint (removeendpoint). Returns a "
+        "warning field the agent MUST surface to the user. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "node_id": NODE_ID,
+            "port": PORT,
+            "protocol": PROTOCOL,
+        }, ("env_name", "node_id", "port", "protocol"), mutating=True),
+        _h_endpoint_close),
+    ToolSpec(
+        "firewall_rule_add",
+        "Add a container firewall rule (addrule): ACCEPT (allow) or DROP "
+        "(block) traffic to a port from a source subnet. Returns a warning "
+        "field the agent MUST surface to the user. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "node_id": NODE_ID,
+            "direction": DIRECTION,
+            "protocol": PROTOCOL,
+            "port": PORT,
+            "subnet": SUBNET,
+        }, ("env_name", "node_id", "direction", "protocol", "port", "subnet"),
+            mutating=True), _h_firewall_rule_add),
+    ToolSpec(
+        "firewall_rule_remove",
+        "Remove the matching container firewall rule (removerule) by its "
+        "direction/protocol/port/subnet tuple. Returns a warning field the "
+        "agent MUST surface to the user. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "node_id": NODE_ID,
+            "direction": DIRECTION,
+            "protocol": PROTOCOL,
+            "port": PORT,
+            "subnet": SUBNET,
+        }, ("env_name", "node_id", "direction", "protocol", "port", "subnet"),
+            mutating=True), _h_firewall_rule_remove),
+    ToolSpec(
+        "file_list",
+        "List files and directories at a node path (getlist). node_id "
+        "defaults to the environment's master node.",
+        _schema({
+            "env_name": _ENV_NAME,
+            "path": FILE_PATH,
+            "node_id": {**NODE_ID, "description": "Node id from env_info "
+                        "(default: master node)."},
+        }, ("env_name", "path"), mutating=False), _h_file_list),
+    ToolSpec(
+        "file_read",
+        "Read a text file from a node (read): size-capped (64 KB head, "
+        "text-only). Traversal paths are refused.",
+        _schema({
+            "env_name": _ENV_NAME,
+            "path": FILE_PATH,
+            "node_id": {**NODE_ID, "description": "Node id from env_info "
+                        "(default: master node)."},
+        }, ("env_name", "path"), mutating=False), _h_file_read),
+    ToolSpec(
+        "file_upload",
+        "Upload/create a text file on a node (upload), content as base64. "
+        "Size-capped (256 KB decoded); content is NEVER echoed back in the "
+        "result (masked like secrets). " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "path": FILE_PATH,
+            "content_b64": FILE_CONTENT,
+            "node_id": {**NODE_ID, "description": "Node id from env_info "
+                        "(default: master node)."},
+        }, ("env_name", "path", "content_b64"), mutating=True),
+        _h_file_upload),
+    ToolSpec(
+        "file_edit",
+        "Edit a text file on a node: find/replace (replaceinbody) or full "
+        "content replacement (write). Exactly one mode. Content is NEVER "
+        "echoed back in the result (masked like secrets). " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "path": FILE_PATH,
+            "find": FILE_FIND,
+            "replace": {**FILE_FIND, "description": "Replacement text "
+                        "(default: empty = delete the matches)."},
+            "content": FILE_TEXT,
+            "node_id": {**NODE_ID, "description": "Node id from env_info "
+                        "(default: master node)."},
+        }, ("env_name", "path"), mutating=True), _h_file_edit),
+    ToolSpec(
+        "trigger_list",
+        "List auto horizontal scaling triggers of an environment "
+        "(gettriggers).",
+        _schema({"env_name": _ENV_NAME}, ("env_name",), mutating=False),
+        _h_trigger_list),
+    ToolSpec(
+        "trigger_create",
+        "Create auto-scaling triggers (addtrigger): scale UP when the metric "
+        "stays above scale_up_threshold, optionally scale DOWN below "
+        "scale_down_threshold. " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "node_group": {**NODE_GROUP, "description": "Node group that "
+                           "scales (default 'cp')."},
+            "metric": METRIC,
+            "scale_up_threshold": THRESHOLD,
+            "scale_down_threshold": THRESHOLD,
+            "period": {"type": "integer", "minimum": 1, "maximum": 1440,
+                       "description": "Sustained minutes before scaling "
+                                      "(default 5)."},
+            "step": {"type": "integer", "minimum": 1, "maximum": 10,
+                     "description": "Nodes added/removed per scaling "
+                                    "action."},
+        }, ("env_name", "metric", "scale_up_threshold", "step"),
+            mutating=True), _h_trigger_create),
+    ToolSpec(
+        "trigger_delete",
+        "Remove an auto-scaling trigger (deletetrigger). " + _CONFIRM_NOTE,
+        _schema({"env_name": _ENV_NAME, "trigger_id": ENTITY_ID},
+                ("env_name", "trigger_id"), mutating=True), _h_trigger_delete),
+    ToolSpec(
+        "task_list",
+        "List scheduled tasks (cron jobs) of an environment (gettasks).",
+        _schema({"env_name": _ENV_NAME}, ("env_name",), mutating=False),
+        _h_task_list),
+    ToolSpec(
+        "task_create",
+        "Create a scheduled task (createenvtask): run an action on a cron "
+        "schedule (server time). " + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "cron": CRON,
+            "action": COMMAND,
+        }, ("env_name", "cron", "action"), mutating=True), _h_task_create),
+    ToolSpec(
+        "task_delete",
+        "Remove a scheduled task (deletetasks). " + _CONFIRM_NOTE,
+        _schema({"env_name": _ENV_NAME, "task_id": ENTITY_ID},
+                ("env_name", "task_id"), mutating=True), _h_task_delete),
+    ToolSpec(
+        "env_share",
+        "Share an environment with a teammate (invitemember): email + role "
+        "(admin/user/viewer). The teammate must accept the invitation. "
+        + _CONFIRM_NOTE,
+        _schema({
+            "env_name": _ENV_NAME,
+            "email": EMAIL,
+            "role": ROLE,
+        }, ("env_name", "email", "role"), mutating=True), _h_env_share),
+    ToolSpec(
+        "env_share_list",
+        "List who an environment is shared with (getmembers): email, role, "
+        "status.",
+        _schema({"env_name": _ENV_NAME}, ("env_name",), mutating=False),
+        _h_env_share_list),
+    ToolSpec(
+        "usage_list",
+        "Billing usage history (getextendedaccountbillinghistorybyperiod): "
+        "per-environment usage rows and cost for a period.",
+        _schema({
+            "env_name": {**_ENV_NAME, "description": "Filter by environment "
+                        "(optional)."},
+            "start_time": TIME_POINT,
+            "end_time": TIME_POINT,
+        }, (), mutating=False), _h_usage_list),
 ]}
 
 
@@ -1176,6 +1890,10 @@ def _friendly_error(exc: JelasticError) -> Tuple[str, str]:
         EnvironmentNotFoundError: ("env_not_found",
                                    "environment not found"),
         NodeNotFoundError: ("node_not_found", "node not found"),
+        PortConflictError: ("port_conflict",
+                            "the port is already exposed on this node — "
+                            "close the existing endpoint first or choose "
+                            "another port"),
         InvalidParameterError: ("invalid_parameter",
                                 "missing or invalid parameter"),
         ManifestError: ("manifest_corrupted",
