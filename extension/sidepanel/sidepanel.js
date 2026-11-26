@@ -665,8 +665,60 @@
       card.appendChild(actionButtons(data.actions));
     }
     turn.appendChild(card);
+    if (kind === "success") followUpChips(turn, data);
     scrollDown();
   }
+
+  /* ---------------------------------------------------------------- */
+  /* follow-up suggestion chips (after relevant success cards)         */
+  /* ---------------------------------------------------------------- */
+
+  /* keyed on the card's own words; renders RE-USED .chip.suggestion
+   * buttons that send their text as the next message */
+  const FOLLOW_UPS = [
+    { match: /domain connected|domain detached|dns hint/i,
+      chips: ["🔒 Check my security", "📊 Explain my bill"] },
+    { match: /is live|deployed|deployment complete|app url|clone ready/i,
+      chips: ["🔗 Connect my domain", "⚡ Set up auto-scaling",
+              "👥 Share access"] },
+    { match: /database|attached/i,
+      chips: ["⏰ Schedule a task", "📊 Explain my bill"] },
+  ];
+  const seenFollowUps = new Set();   // each suggestion renders once
+
+  function followUpChips(turn, data) {
+    const text = `${data.title || ""} ${data.body_md || ""}`;
+    const entry = FOLLOW_UPS.find((rule) => rule.match.test(text));
+    const chips = (entry ? entry.chips : ["📊 Explain my bill",
+                                          "🔒 Check my security"])
+      .filter((label) => {
+        if (seenFollowUps.has(label)) return false;
+        seenFollowUps.add(label);
+        return true;
+      });
+    if (!chips.length) return;
+    const wrap = document.createElement("div");
+    wrap.className = "follow-ups";
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.textContent = "What next?";
+    wrap.appendChild(label);
+    for (const text of chips) {
+      const chip = document.createElement("button");
+      chip.className = "chip suggestion followup";
+      chip.dataset.label = text;
+      chip.textContent = text;
+      wrap.appendChild(chip);
+    }
+    turn.appendChild(wrap);
+    scrollDown();
+  }
+
+  el.messages.addEventListener("click", (event) => {
+    const chip = event.target.closest(".chip.suggestion.followup");
+    if (!chip || state.busy) return;
+    sendMessage(chip.textContent.trim());
+  });
 
   /** single-line fenced blocks become mono values with copy buttons
    *  (DESIGN.md: domains, connection strings, passwords render in mono

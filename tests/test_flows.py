@@ -724,6 +724,490 @@ def test_direct_mutation_declined_runs_nothing(app, state):
     assert events[-1][0] == "done"
 
 
+# --- T14 coverage workflows ---------------------------------------------------
+
+def _args(call: dict) -> dict:
+    """Tool args as seen by the platform (the gate adds confirm=True)."""
+    return {k: v for k, v in call["args"].items() if k != "confirm"}
+
+
+def assert_discovery_clean(events):
+    """Missing info must produce questions, not failure rows: no tool row may
+    fail before the confirm gate."""
+    seen_confirm = False
+    for name, payload in events:
+        if name == "confirm_action":
+            seen_confirm = True
+        if name == "tool_result" and not seen_confirm:
+            assert payload.get("ok"), f"discovery row failed: {payload}"
+
+
+# --- flow: domain setup -------------------------------------------------------
+
+def test_domain_setup_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    llm = FakeLLM(llm_flow("domain_setup", {"env_name": "web1"}), FINISH)
+    verifier = FakeVerifier()
+    agent_app = make_agent(app, llm=llm, verifier=verifier)
+    events = run(drive_chat(
+        agent_app, "conv-domain", "подключить домен shop.example.com",
+        [{"kind": "ask", "answer": "shop.example.com"},
+         {"kind": "ask", "answer": "Yes, enable HTTPS"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 2
+    assert any("domain" in a["question"].lower() for a in asks)
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert "shop.example.com" in confirms[0]["summary"]
+
+    calls = tool_calls(events, "domain_bind")
+    assert calls and _args(calls[0]) == {"env_name": "web1",
+                                         "ext_domain": "shop.example.com",
+                                         "ssl": True}
+    # verify step ran: binding observed in env_info + the URL was checked
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "env_info" in names and "verify_http" in names
+    assert names.index("domain_bind") < names.index("verify_http")
+    assert verifier.calls == ["https://shop.example.com/"]
+
+    success = cards(events, "success")
+    assert success and "shop.example.com" in success[0]["body_md"]
+    labels = [a["label"] for a in success[0]["actions"]]
+    assert "Open app" in labels and "Open dashboard" in labels
+
+    bound = [d["extDomain"] for d in state.envs["web1"].ext_domains]
+    assert bound == ["shop.example.com"]
+    assert state.envs["web1"].ssl is not None
+    assert events[-1][0] == "done"
+
+
+def test_domain_setup_dns_hint_when_not_resolving(app, state):
+    """A domain that does not resolve yet is EXPECTED right after a bind:
+    the flow shows the DNS hint on the success card, not an error."""
+    token = make_env(state, "web1")
+    llm = FakeLLM(
+        llm_flow("domain_setup", {"env_name": "web1",
+                                  "domain": "shop.example.com", "ssl": True}),
+        FINISH)
+    agent_app = make_agent(app, llm=llm,
+                          verifier=FakeVerifier(ok=False, status=500,
+                                                detail="DNS error"))
+    events = run(drive_chat(
+        agent_app, "conv-domain-dns", "my own domain",
+        [{"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+    assert not [p for name, p in events if name == "ask_user"]
+    success = cards(events, "success")
+    assert success and "DNS hint" in success[0]["body_md"]
+    assert "shop.example.com" in success[0]["body_md"]
+    assert events[-1][0] == "done"
+
+
+def test_domain_unbind_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    code, payload = state.bindextdomain(token, "web1", "shop.example.com")
+    assert code == 0, payload
+    llm = FakeLLM(llm_flow("domain_unbind", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-unbind", "detach the domain",
+        [{"kind": "ask", "answer": "shop.example.com"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+    calls = tool_calls(events, "domain_unbind")
+    assert calls and calls[0]["args"]["ext_domain"] == "shop.example.com"
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1 and "stop" in confirms[0]["summary"]
+    assert not state.envs["web1"].ext_domains
+    success = cards(events, "success")
+    assert success and "detached" in success[0]["body_md"].lower()
+    assert events[-1][0] == "done"
+
+
+# --- flow: clone environment --------------------------------------------------
+
+def test_clone_env_flow_end_to_end(app, state):
+    token = make_env(state, "prod-1")
+    llm = FakeLLM(llm_flow("clone_env", {"env_name": "prod-1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-clone", "copy environment prod-1",
+        [{"kind": "ask", "answer": "prod-copy"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 1 and "clone" in asks[0]["question"].lower()
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert "prod-1" in confirms[0]["summary"]
+    assert "prod-copy" in confirms[0]["summary"]
+    assert "topology" in confirms[0]["summary"]   # what gets cloned
+
+    calls = tool_calls(events, "env_clone")
+    assert calls and _args(calls[0]) == {"env_name": "prod-1",
+                                         "new_name": "prod-copy"}
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    # wait-ready + verify steps ran
+    assert "op_result" in names and "env_info" in names
+    assert names.index("env_clone") < names.index("op_result")
+
+    clone = state.envs["prod-copy"]
+    assert clone.status == "running"
+    assert len(clone.nodes) == len(state.envs["prod-1"].nodes)
+    success = cards(events, "success")
+    assert success and "prod-copy" in success[0]["body_md"]
+    assert events[-1][0] == "done"
+
+
+# --- flow: auto-scaling -------------------------------------------------------
+
+def test_autoscale_setup_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    llm = FakeLLM(llm_flow("autoscale_setup", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-autoscale", "auto scale",
+        [{"kind": "ask", "answer": "cp"},
+         {"kind": "ask", "answer": "CPU (processor load)"},
+         {"kind": "ask", "answer": "Scale up at 80%, scale down at 40% (busy)"},
+         {"kind": "ask", "answer": "Add 1 node at a time"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 4
+    assert any("metric" in a["question"].lower() for a in asks)
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    # plain-language 'what will happen'
+    assert "stays above" in confirms[0]["summary"]
+    assert "add 1 node" in confirms[0]["summary"]
+
+    calls = tool_calls(events, "trigger_create")
+    assert calls
+    args = calls[0]["args"]
+    assert args["metric"] == "CPU"
+    assert args["scale_up_threshold"] == 80
+    assert args["scale_down_threshold"] == 40
+    assert args["step"] == 1 and args["node_group"] == "cp"
+    # verify step ran AFTER the mutation
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "trigger_list" in names
+    assert names.index("trigger_create") < names.index("trigger_list")
+
+    triggers = state.envs["web1"].triggers
+    assert len(triggers) == 2        # ADD up + REMOVE down pair
+    assert {t["action"] for t in triggers} == {"ADD", "REMOVE"}
+    success = cards(events, "success")
+    assert success and "auto-scaling" in success[0]["title"].lower()
+    assert events[-1][0] == "done"
+
+
+def test_trigger_manage_remove_flow(app, state):
+    token = make_env(state, "web1")
+    code, payload = state.addtrigger(token, env_name="web1", node_group="cp",
+                                     type="CPU", condition=">", value=80,
+                                     period=5, amount=1, action="ADD")
+    assert code == 0, payload
+    trigger_id = state.envs["web1"].triggers[0]["id"]
+    llm = FakeLLM(llm_flow("trigger_manage", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-trigger", "remove a scaling trigger",
+        [{"kind": "ask", "answer": str(trigger_id)},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    calls = tool_calls(events, "trigger_delete")
+    assert calls and calls[0]["args"]["trigger_id"] == trigger_id
+    # listed before the question and re-verified after the removal
+    assert names.index("trigger_list") < names.index("trigger_delete")
+    assert names.index("trigger_delete") < names.index("trigger_list",
+                                                       names.index("trigger_delete"))
+    assert not state.envs["web1"].triggers
+    success = cards(events, "success")
+    assert success and "removed" in success[0]["title"].lower()
+    assert events[-1][0] == "done"
+
+
+# --- flow: scheduled tasks ----------------------------------------------------
+
+def test_schedule_task_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    llm = FakeLLM(llm_flow("schedule_task", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-cron", "schedule a restart every night",
+        [{"kind": "ask", "answer": "Restart the environment"},
+         {"kind": "ask", "answer": "Every night at 2 AM"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 2
+    assert any("cron" in a["question"].lower()
+               or "when" in a["question"].lower() for a in asks)
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1 and "restart" in confirms[0]["summary"].lower()
+
+    calls = tool_calls(events, "task_create")
+    assert calls and _args(calls[0]) == {"env_name": "web1",
+                                         "cron": "0 2 * * *",
+                                         "action": "restart"}
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "task_list" in names
+    assert names.index("task_create") < names.index("task_list")
+
+    tasks = state.envs["web1"].tasks
+    assert len(tasks) == 1 and tasks[0]["cron"] == "0 2 * * *"
+    success = cards(events, "success")
+    assert success and "Next run" in success[0]["body_md"]
+    assert "02:00" in success[0]["body_md"]
+    assert events[-1][0] == "done"
+
+
+# --- flow: share access -------------------------------------------------------
+
+def test_share_env_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    llm = FakeLLM(llm_flow("share_env", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-share", "share access with my teammate",
+        [{"kind": "ask", "answer": "teammate@example.com"},
+         {"kind": "ask", "answer": "Admin — full control over the environment"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    asks = [p for name, p in events if name == "ask_user"]
+    assert len(asks) == 2
+    assert any("access" in a["question"].lower() for a in asks)
+    # plain-language permission summary before the confirmation
+    assert "full control" in texts(events)
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert "teammate@example.com" in confirms[0]["summary"]
+
+    calls = tool_calls(events, "env_share")
+    assert calls and _args(calls[0]) == {"env_name": "web1",
+                                         "email": "teammate@example.com",
+                                         "role": "admin"}
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "env_share_list" in names
+    assert names.index("env_share") < names.index("env_share_list")
+
+    shares = state.envs["web1"].shares
+    assert len(shares) == 1 and shares[0]["role"] == "admin"
+    success = cards(events, "success")
+    assert success and "invitation" in success[0]["body_md"].lower()
+    assert events[-1][0] == "done"
+
+
+# --- flow: usage / bill report ------------------------------------------------
+
+def test_usage_report_flow_read_only(app, state):
+    make_env(state, "web1")
+    make_env(state, "web2")
+    token = state.signin(state.config.login, state.config.password)[1]["session"]
+    llm = FakeLLM(llm_flow("usage_report", {}, "Here is your bill!"), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-bill", "explain my bill",
+        [], scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    # read-only: no questions, no confirmation, no mutating tools
+    assert not [p for name, p in events if name == "ask_user"]
+    assert not [p for name, p in events if name == "confirm_action"]
+    assert not any(p["name"] in MUTATING for name, p in events
+                   if name == "tool_call")
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "quota_get" in names and "usage_list" in names
+
+    report = cards(events, "info")
+    assert report, "the bill renders as a readable info card"
+    body = report[0]["body_md"]
+    assert "web1" in body and "web2" in body
+    assert "$" in body and "Total" in body        # readable table
+    assert "One insight" in body                  # one insight, not a dump
+    assert events[-1][0] == "done"
+
+
+# --- flows: public ports ------------------------------------------------------
+
+def test_open_port_flow_exposure_gated(app, state):
+    token = make_env(state, "web1")
+    node_id = state.envs["web1"].nodes[0].id
+    llm = FakeLLM(llm_flow("open_port", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-port", "open port 25565",
+        [{"kind": "ask", "answer": str(node_id)},
+         {"kind": "ask", "answer": "25565"},
+         {"kind": "ask", "answer": "TCP"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    # the INTERNET EXPOSURE line is mandatory and never softened
+    assert "INTERNET EXPOSURE" in confirms[0]["summary"]
+    assert "whole Internet" in confirms[0]["summary"]
+
+    calls = tool_calls(events, "endpoint_open")
+    assert calls and _args(calls[0]) == {"env_name": "web1",
+                                         "node_id": node_id, "port": 25565,
+                                         "protocol": "TCP"}
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    assert "env_info" in names                       # observable-state verify
+    assert names.index("endpoint_open") < names.index("env_info",
+                                                      names.index("endpoint_open"))
+    assert len(state.envs["web1"].endpoints) == 1
+    success = cards(events, "success")
+    assert success and "Warning" in success[0]["body_md"]
+    assert events[-1][0] == "done"
+
+
+def test_close_port_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    node_id = state.envs["web1"].nodes[0].id
+    code, payload = state.addendpoint(token, "web1", node_id, "TCP-25565",
+                                      25565, "TCP")
+    assert code == 0, payload
+    llm = FakeLLM(llm_flow("close_port", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-close", "close the port",
+        [{"kind": "ask", "answer": str(node_id)},
+         {"kind": "ask", "answer": "25565"},
+         {"kind": "ask", "answer": "TCP"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    calls = tool_calls(events, "endpoint_close")
+    assert calls and calls[0]["args"]["port"] == 25565
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert not state.envs["web1"].endpoints
+    success = cards(events, "success")
+    assert success and "closed" in success[0]["title"].lower()
+    assert events[-1][0] == "done"
+
+
+# --- flow: container firewall -------------------------------------------------
+
+def test_firewall_manage_add_and_remove(app, state):
+    token = make_env(state, "web1")
+    node_id = state.envs["web1"].nodes[0].id
+    llm = FakeLLM(
+        llm_flow("firewall_manage", {"env_name": "web1"}),
+        llm_flow("firewall_manage", {"env_name": "web1", "action": "remove"}),
+        FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+
+    # turn 1: add a DROP rule (gated with a FIREWALL CHANGE recap)
+    events = run(drive_chat(
+        agent_app, "conv-fw", "block port 22 from 10.0.0.0/8",
+        [{"kind": "ask", "answer": str(node_id)},
+         {"kind": "ask", "answer": "Block traffic (DROP)"},
+         {"kind": "ask", "answer": "TCP"},
+         {"kind": "ask", "answer": "22"},
+         {"kind": "ask", "answer": "10.0.0.0/8 (private networks)"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert "Firewall change" in confirms[0]["summary"]
+    calls = tool_calls(events, "firewall_rule_add")
+    assert calls and _args(calls[0]) == {
+        "env_name": "web1", "node_id": node_id, "direction": "DROP",
+        "protocol": "TCP", "port": 22, "subnet": "10.0.0.0/8"}
+    assert len(state.envs["web1"].firewall_rules) == 1
+    success = cards(events, "success")
+    assert success and "Warning" in success[0]["body_md"]
+
+    # turn 2: remove the same rule (same gating)
+    events = run(drive_chat(
+        agent_app, "conv-fw2", "remove the firewall rule",
+        [{"kind": "ask", "answer": str(node_id)},
+         {"kind": "ask", "answer": "DROP (block) rule"},
+         {"kind": "ask", "answer": "TCP"},
+         {"kind": "ask", "answer": "22"},
+         {"kind": "ask", "answer": "10.0.0.0/8 (private networks)"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+    calls = tool_calls(events, "firewall_rule_remove")
+    assert calls and calls[0]["args"]["direction"] == "DROP"
+    assert not state.envs["web1"].firewall_rules
+    success = cards(events, "success")
+    assert success and "removed" in success[0]["title"].lower()
+    assert events[-1][0] == "done"
+
+
+# --- flow: restart ------------------------------------------------------------
+
+def test_restart_flow_end_to_end(app, state):
+    token = make_env(state, "web1")
+    llm = FakeLLM(llm_flow("restart", {"env_name": "web1"}), FINISH)
+    agent_app = make_agent(app, llm=llm, verifier=FakeVerifier())
+    events = run(drive_chat(
+        agent_app, "conv-restart", "restart",
+        [{"kind": "ask", "answer": "Restart the whole environment"},
+         {"kind": "confirm", "approved": True}],
+        scenario_headers(token)))
+    assert_contract(events)
+    assert_discovery_clean(events)
+
+    confirms = [p for name, p in events if name == "confirm_action"]
+    assert len(confirms) == 1
+    assert "briefly unavailable" in confirms[0]["summary"]
+    calls = tool_calls(events, "env_restart")
+    assert calls
+    names = [p["name"] for name, p in events if name == "tool_call"]
+    # verify: wait for readiness, then re-read observable state
+    assert "op_result" in names and "env_info" in names
+    assert names.index("env_restart") < names.index("op_result")
+
+    time.sleep(TRANSITION + 0.02)
+    state.advance_all()
+    env = state.envs["web1"]
+    assert env.status == "running"
+    assert all(n.status == "ok" for n in env.nodes)
+    success = cards(events, "success")
+    assert success and "running" in success[0]["body_md"]
+    assert events[-1][0] == "done"
+
+
 # --- API surface (error codes, healthz) -------------------------------------
 
 def test_api_error_codes_and_healthz(app):

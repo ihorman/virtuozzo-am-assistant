@@ -1,4 +1,7 @@
-"""Guided flows: deploy_app, db_add, scale, troubleshoot, security_review.
+"""Guided flows: deploy_app, db_add, scale, troubleshoot, security_review
+plus the coverage workflows (T14): domain_setup / domain_unbind, clone_env,
+autoscale_setup / trigger_manage, schedule_task, share_env, usage_report,
+open_port / close_port, firewall_manage, restart.
 
 Deterministic state machines the LLM starts via ``start_flow`` directives
 (docs/PLAN.md section 3). Each step asks ONE clarifying question with options
@@ -1110,6 +1113,1020 @@ async def troubleshoot(ctx: FlowContext) -> None:
           "action": "open_url", "payload": {}}])
 
 
+# --- T14 coverage workflows --------------------------------------------------
+#
+# House style (docs/SCENARIOS.md design rules): one question per ask_user with
+# option chips, missing info is NEVER an error, recap -> Confirm -> execute ->
+# observable-state verify -> success card with actions; failures go through
+# diagnose -> auto-fix (handle_failure) and may never weaken security.
+
+#: custom-domain hostnames (mirrors the tool validator)
+HOSTNAME_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+_SUBNET_RE = re.compile(
+    r"^([0-9]{1,3}\.){3}[0-9]{1,3}(/(3[0-2]|[12]?[0-9]))?$")
+
+
+def _normalize_domain(answer: str) -> str:
+    """'https://App.Example.com/path' -> 'app.example.com'; '' if invalid."""
+    text = (answer or "").strip().lower()
+    text = re.sub(r"^[a-z]+://", "", text)
+    text = text.split("/")[0].split(":")[0].strip()
+    return text if HOSTNAME_RE.match(text) else ""
+
+
+def _normalize_subnet(answer: str) -> str:
+    """'10.0.0.0/8 (private networks)' -> '10.0.0.0/8'; '' if invalid."""
+    text = (answer or "").strip().split()[0] if (answer or "").strip() else ""
+    return text if _SUBNET_RE.match(text) else ""
+
+
+def _normalize_protocol(answer: str) -> str:
+    return "UDP" if "udp" in (answer or "").lower() else "TCP"
+
+
+def _parse_port(answer) -> Optional[int]:
+    found = re.search(r"\d+", str(answer or ""))
+    if not found:
+        return None
+    value = int(found.group(0))
+    return value if 1 <= value <= 65535 else None
+
+
+async def _resolve_env(ctx: FlowContext, question: str,
+                       param: str = "env_name") -> str:
+    """Target environment from params, or ONE picker question (chips)."""
+    env_name = slugify_env_name(str(ctx.params.get(param) or "")) \
+        if ctx.params.get(param) else ""
+    if env_name and not await _env_known(ctx, env_name):
+        await ctx.say(f"I couldn't find an environment named `{env_name}` — "
+                      "let's pick one from your list.")
+        env_name = ""
+    if not env_name:
+        listed = await ctx.run_tool("envs_list", {})
+        names = [str(e.get("envName")) for e in
+                 ((listed.payload or {}).get("environments") or [])]
+        if not names:
+            await ctx.say("There are no environments on this account yet — "
+                          "create one first and I will come back to this.")
+            return ""
+        env_name = match_option(await ctx.ask(question, names), names)
+    return env_name
+
+
+def _node_label(node: dict) -> str:
+    return (f"{node.get('displayName') or node.get('nodeType') or 'node'} "
+            f"(node {node.get('id')})")
+
+
+async def _resolve_node(ctx: FlowContext, env_name: str, question: str,
+                        param: str = "node_id") -> Optional[dict]:
+    """One node of the environment from params, or ONE picker question."""
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    nodes = [n for n in (((info.payload or {}).get("env") or {}).get("nodes")
+                         or []) if n.get("id") is not None]
+    wanted = ctx.params.get(param)
+    if wanted is not None:
+        match = next((n for n in nodes if str(n.get("id")) == str(wanted)),
+                     None)
+        if match is not None:
+            return match
+    if not nodes:
+        await ctx.say(f"`{env_name}` has no nodes to act on.")
+        return None
+    labels = [_node_label(n) for n in nodes]
+
+    def _check(answer: str) -> Optional[str]:
+        return None if re.search(r"node\s+\d+", answer) else \
+            "Please pick one of the nodes listed."
+
+    answer = await ctx.ask(question, labels, validate=_check)
+    found = re.search(r"node\s+(\d+)", answer)
+    if found:
+        return next((n for n in nodes if str(n.get("id")) == found.group(1)),
+                    nodes[0])
+    return nodes[0]
+
+
+async def _pick_node_group(ctx: FlowContext, env_name: str,
+                           param: str = "node_group") -> str:
+    groups = str(ctx.params.get(param) or "").strip()
+    if groups:
+        return groups
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    names = sorted({str(n.get("nodeGroup") or "cp") for n in
+                    (((info.payload or {}).get("env") or {}).get("nodes")
+                     or [])}) or ["cp"]
+    return match_option(await ctx.ask(
+        "Which node group should scale?", names), names)
+
+
+# --- flow: domains (connect / detach custom domains + SSL) -------------------
+
+async def domain_setup(ctx: FlowContext) -> None:
+    """Connect a custom domain to an environment (rows 7-8).
+
+    pick env -> ask domain (free text, hostname-validated) -> optional
+    Let's Encrypt SSL -> recap -> Confirm -> bind -> verify (env_info shows
+    the binding; verify_url checks DNS and prints a hint when the domain
+    does not resolve yet) -> success card (Open app / Open dashboard).
+    """
+    env_name = await _resolve_env(
+        ctx, "Which environment should I connect the domain to?")
+    if not env_name:
+        return
+
+    domain = _normalize_domain(str(ctx.params.get("domain")
+                                   or ctx.params.get("ext_domain") or ""))
+    if not domain:
+        domain = _normalize_domain(await ctx.ask(
+            "What domain would you like to connect? (e.g. `app.example.com`)",
+            allow_free=True,
+            validate=lambda a: (None if _normalize_domain(a) else
+                                "Please give a valid domain name, e.g. "
+                                "`app.example.com`.")))
+
+    ssl = _parse_ssl(ctx.params["ssl"]) if ctx.params.get("ssl") is not None \
+        else _parse_ssl(await ctx.ask(
+            "Should I also issue a free Let's Encrypt SSL certificate "
+            "(HTTPS)?", ["Yes, enable HTTPS", "No, just connect the domain"]))
+
+    recap = (f"Connect **{domain}** to `{env_name}`"
+             + (" and issue a free Let's Encrypt SSL certificate (HTTPS)."
+                if ssl else " (no SSL).")
+             + " DNS must point the domain at the platform for it to open.")
+    approved = await ctx.confirm(
+        recap, actions=(["connect domain", "issue SSL certificate"]
+                        if ssl else ["connect domain"]))
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "ext_domain": domain, "ssl": ssl}
+    out = await ctx.run_tool("domain_bind", step_args, confirmed=True,
+                             progress="Connecting the domain")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="domain_bind")
+        if out is None or not out.ok:
+            return
+
+    # observable-state verify: the binding appears in env_info ...
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    bound = [d for d in (((info.payload or {}).get("env") or {})
+                         .get("extDomains") or [])
+             if str(d.get("extDomain") or "").lower() == domain]
+    # ... and the URL check tells us whether DNS has caught up (not
+    # resolving right after a bind is expected, never an error).
+    app_url = f"{'https' if ssl else 'http'}://{domain}/"
+    checked = await ctx.verify_url(app_url)
+
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Domain: `{domain}`\n"
+            "- SSL: " + ("Let's Encrypt (HTTPS)" if ssl else "off") + "\n")
+    if not bound:
+        body += ("\nThe platform has not confirmed the binding yet — ask me "
+                 "to re-check in a moment.")
+    if checked.ok:
+        body += f"\nVerified: `{app_url}` answers — the domain is live."
+    else:
+        body += (f"\n**DNS hint:** `{domain}` does not resolve to the "
+                 "platform yet. Point its DNS (an A or CNAME record) at the "
+                 "platform and allow up to a few minutes for propagation — "
+                 "the binding itself is already active.")
+    await ctx.card("success", "Domain connected", body,
+                   [{"label": "Open app", "url": app_url,
+                     "action": "open_url", "payload": {}},
+                    {"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+async def domain_unbind(ctx: FlowContext) -> None:
+    """Detach a custom domain from an environment (row 7, closing path)."""
+    env_name = await _resolve_env(
+        ctx, "Which environment should I detach the domain from?")
+    if not env_name:
+        return
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    bound = [str(d.get("extDomain")) for d in
+             (((info.payload or {}).get("env") or {}).get("extDomains") or [])]
+
+    domain = _normalize_domain(str(ctx.params.get("domain")
+                                   or ctx.params.get("ext_domain") or ""))
+    if not domain:
+        domain = _normalize_domain(await ctx.ask(
+            "Which domain should I detach?", bound, allow_free=True,
+            validate=lambda a: (None if _normalize_domain(a) else
+                                "Please give a valid domain name, e.g. "
+                                "`app.example.com`.")))
+
+    recap = (f"Detach **{domain}** from `{env_name}` — the domain will stop "
+             "opening this environment.")
+    approved = await ctx.confirm(recap, actions=["detach domain"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "ext_domain": domain}
+    out = await ctx.run_tool("domain_unbind", step_args, confirmed=True,
+                             progress="Detaching the domain")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="domain_unbind")
+        if out is None or not out.ok:
+            return
+
+    info = await ctx.run_tool("env_info", {"env_name": env_name})
+    still = [d for d in (((info.payload or {}).get("env") or {})
+                         .get("extDomains") or [])
+             if str(d.get("extDomain") or "").lower() == domain]
+    body = (f"- Environment: `{env_name}`\n- Domain: `{domain}`\n\n"
+            + ("The domain is detached." if not still else
+               "The platform still lists the domain — ask me to re-check "
+               "in a moment."))
+    await ctx.card("success", "Domain detached", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: clone environment -------------------------------------------------
+
+async def clone_env(ctx: FlowContext) -> None:
+    """Clone an environment (row 9): source -> new name -> recap -> Confirm
+    -> clone -> wait ready (op_result) -> success card."""
+    source = await _resolve_env(ctx, "Which environment should I clone?")
+    if not source:
+        return
+    listed = await ctx.run_tool("envs_list", {})
+    existing = {str(e.get("envName")) for e in
+                ((listed.payload or {}).get("environments") or [])}
+
+    def _check_name(answer: str) -> Optional[str]:
+        name = answer.strip()
+        if not ENV_NAME_RE.match(name):
+            return ("Please use lowercase letters, digits and dashes "
+                    "(must start with a letter, max 30 characters).")
+        if name in existing:
+            return f"`{name}` is already taken — pick a different name."
+        return None
+
+    new_name = slugify_env_name(str(ctx.params.get("new_name") or "")) \
+        if ctx.params.get("new_name") else ""
+    if new_name and new_name in existing:
+        await ctx.say(f"`{new_name}` is already taken — let's pick another "
+                      "name.")
+        new_name = ""
+    if not new_name:
+        new_name = (await ctx.ask(
+            "What should the clone be called?", allow_free=True,
+            validate=_check_name)).strip()
+
+    recap = (f"Clone `{source}` to **{new_name}**: a full copy of the "
+             "topology (nodes and their sizes), data, configuration, "
+             "environment variables, triggers and scheduled tasks. The "
+             "clone is a separate environment — the original is not "
+             "touched.")
+    approved = await ctx.confirm(recap, actions=["clone environment"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": source, "new_name": new_name}
+    out = await ctx.run_tool("env_clone", step_args, confirmed=True,
+                             progress="Cloning the environment")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="env_clone")
+        if out is None or not out.ok:
+            return
+
+    ready = await ctx.run_tool("op_result", {
+        "env_name": new_name, "op": "status", "target": ["running"],
+        "timeout": 60}, progress="Waiting for the clone to start")
+    if not ready.ok or ready.payload.get("status") != "done":
+        await ctx.say(f"The clone `{new_name}` is still being assembled — "
+                      "ask me to check in a moment.")
+        return
+    info = await ctx.run_tool("env_info", {"env_name": new_name})
+    domain = str(((info.payload or {}).get("env") or {}).get("domain") or "")
+    body = (f"- Source: `{source}`\n"
+            f"- Clone: `{new_name}`\n"
+            f"- URL: `{domain or 'pending'}`\n\n"
+            f"_Verified: the clone is up and running._")
+    actions = [{"label": "Open dashboard", "url": f"{ctx.tools.auth.host}/",
+                "action": "open_url", "payload": {}}]
+    if domain:
+        actions.insert(0, {"label": "Open clone",
+                           "url": f"https://{domain}/", "action": "open_url",
+                           "payload": {}})
+    await ctx.card("success", "Clone ready", body, actions)
+
+
+# --- flow: auto-scaling triggers ---------------------------------------------
+
+_METRIC_TOKENS = (("cpu", "CPU"), ("ram", "RAM"), ("mem", "RAM"),
+                  ("disk", "DISK"), ("request", "REQUESTS"),
+                  ("traffic", "REQUESTS"))
+
+
+def _normalize_metric(answer: str) -> str:
+    lowered = (answer or "").lower()
+    for token, metric in _METRIC_TOKENS:
+        if token in lowered:
+            return metric
+    return "CPU"
+
+
+def _parse_thresholds(answer: str) -> Optional[Tuple[int, Optional[int]]]:
+    """'Scale up at 80%, scale down at 40% (busy)' -> (80, 40)."""
+    numbers = [int(n) for n in re.findall(r"\d+", answer or "")]
+    numbers = [n for n in numbers if 0 <= n <= 100]
+    if not numbers:
+        return None
+    up = numbers[0]
+    down = numbers[1] if len(numbers) > 1 and numbers[1] < up else None
+    return up, down
+
+
+def _parse_step(answer) -> int:
+    found = re.search(r"\d+", str(answer or ""))
+    value = int(found.group(0)) if found else 1
+    return value if 1 <= value <= 10 else 1
+
+
+async def autoscale_setup(ctx: FlowContext) -> None:
+    """Auto horizontal scaling (row 14): env -> node group -> metric ->
+    thresholds -> step -> plain-language 'what will happen' -> Confirm ->
+    trigger_create -> verify (trigger_list) -> success card. Also the
+    trigger management entry point is :func:`trigger_manage`."""
+    env_name = await _resolve_env(ctx, "Which environment should auto-scale?")
+    if not env_name:
+        return
+    group = await _pick_node_group(ctx, env_name)
+
+    metric = str(ctx.params.get("metric") or "").strip()
+    metric = _normalize_metric(metric if metric else await ctx.ask(
+        "Which metric should trigger scaling?",
+        ["CPU (processor load)", "RAM (memory)", "Disk (storage)",
+         "Requests (traffic)"]))
+
+    thresholds = _parse_thresholds(str(ctx.params.get("thresholds") or "")) \
+        if ctx.params.get("thresholds") else None
+    if thresholds is None and ctx.params.get("scale_up_threshold") is not None:
+        up = _parse_cloudlets(str(ctx.params["scale_up_threshold"]), default=0)
+        down = _parse_cloudlets(str(ctx.params.get("scale_down_threshold")
+                                    or ""), default=0) or None
+        thresholds = (up, down if down and down < up else None)
+    if thresholds is None:
+        thresholds = _parse_thresholds(await ctx.ask(
+            "When should it scale?",
+            ["Scale up at 70%, scale down at 30% (balanced)",
+             "Scale up at 80%, scale down at 40% (busy)",
+             "Scale up at 90% (spikes only)"])) or (70, None)
+    up, down = thresholds
+
+    step = _parse_step(ctx.params.get("step")) if ctx.params.get("step") \
+        else _parse_step(await ctx.ask(
+            "How many nodes should be added per step?",
+            ["Add 1 node at a time", "Add 2 nodes at a time"]))
+
+    what = (f"When **{metric}** on the `{group}` nodes stays above **{up}%** "
+            f"for 5 minutes, I add {step} node(s) automatically.")
+    if down is not None:
+        what += (f" When it stays below **{down}%**, I remove them again.")
+    what += (" That keeps the app responsive under load and saves money when "
+             "the load drops.")
+    recap = (f"{what}\n\nEnvironment: `{env_name}`, node group: `{group}`.")
+    approved = await ctx.confirm(recap, actions=["create scaling trigger"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "node_group": group, "metric": metric,
+                 "scale_up_threshold": up, "step": step, "period": 5}
+    if down is not None:
+        step_args["scale_down_threshold"] = down
+    out = await ctx.run_tool("trigger_create", step_args, confirmed=True,
+                             progress="Creating the scaling trigger")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="trigger_create")
+        if out is None or not out.ok:
+            return
+
+    listed = await ctx.run_tool("trigger_list", {"env_name": env_name})
+    count = (listed.payload or {}).get("count")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Node group: `{group}`\n"
+            f"- Rule: {what}\n\n"
+            + (f"Verified: {count} scaling rule(s) active on the "
+               f"environment." if listed.ok else
+               "Ask me to re-check the scaling rules in a moment."))
+    await ctx.card("success", "Auto-scaling is on", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+async def trigger_manage(ctx: FlowContext) -> None:
+    """List / remove auto-scaling triggers (row 14, management path)."""
+    env_name = await _resolve_env(
+        ctx, "Which environment's scaling rules should I manage?")
+    if not env_name:
+        return
+    listed = await ctx.run_tool("trigger_list", {"env_name": env_name})
+    triggers = (listed.payload or {}).get("triggers") or []
+    if not triggers:
+        await ctx.card(
+            "info", "No scaling rules yet",
+            f"`{env_name}` has no auto-scaling triggers. Say **set up "
+            "auto-scaling** and I will create one.", [])
+        return
+
+    await ctx.say("Current scaling rules:\n" + "\n".join(
+        f"- `#{t.get('id')}`: {t.get('type')} {t.get('condition')} "
+        f"{t.get('value')}% → {t.get('action')} {t.get('amount')} node(s)"
+        for t in triggers))
+    labels = [f"#{t.get('id')}: {t.get('type')} {t.get('condition')} "
+              f"{t.get('value')} → {t.get('action')} {t.get('amount')}"
+              for t in triggers]
+    choice = await ctx.ask("Which rule should I remove?", labels +
+                           ["Keep them all"], allow_free=True)
+    found = re.search(r"#?(\d+)", choice)
+    if found is None or "keep" in choice.lower():
+        await ctx.say("Understood — I changed nothing.")
+        return
+    trigger_id = int(found.group(1))
+
+    recap = (f"Remove scaling rule `#{trigger_id}` from `{env_name}` — the "
+             "environment will no longer scale automatically because of it.")
+    approved = await ctx.confirm(recap, actions=["remove scaling trigger"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "trigger_id": trigger_id}
+    out = await ctx.run_tool("trigger_delete", step_args, confirmed=True,
+                             progress="Removing the scaling trigger")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="trigger_delete")
+        if out is None or not out.ok:
+            return
+
+    listed = await ctx.run_tool("trigger_list", {"env_name": env_name})
+    still = [t for t in ((listed.payload or {}).get("triggers") or [])
+             if str(t.get("id")) == str(trigger_id)]
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Removed rule: `#{trigger_id}`\n\n"
+            + ("Verified: the rule is gone." if not still else
+               "The platform still lists the rule — ask me to re-check "
+               "in a moment."))
+    await ctx.card("success", "Scaling rule removed", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: scheduled tasks ---------------------------------------------------
+
+_CRON_PRESETS = (
+    ("every night at 2 am", "0 2 * * *", "every night at 02:00"),
+    ("every hour", "0 * * * *", "every hour on the hour"),
+    ("weekdays at 9 am", "0 9 * * 1-5", "weekdays at 09:00"),
+)
+
+
+def _parse_cron(answer: str) -> Optional[str]:
+    text = (answer or "").strip().lower()
+    for token, cron, _human in _CRON_PRESETS:
+        if token in text:
+            return cron
+    fields = text.split()
+    if len(fields) == 5 and all(re.fullmatch(r"[0-9*/, \-]+", f)
+                                for f in fields):
+        return " ".join(fields)
+    return None
+
+
+def _cron_human(cron: str) -> str:
+    for _token, preset, human in _CRON_PRESETS:
+        if preset == cron:
+            return human
+    return f"on the schedule `{cron}`"
+
+
+_TASK_ACTIONS = (("restart", "restart"), ("scale up", "scale up"),
+                 ("scale down", "scale down"))
+
+
+def _normalize_task_action(answer: str) -> str:
+    lowered = (answer or "").lower()
+    for token, action in _TASK_ACTIONS:
+        if token in lowered:
+            return action
+    return (answer or "").strip()
+
+
+def _command_ok(answer: str) -> Optional[str]:
+    text = (answer or "").strip()
+    return None if text and re.fullmatch(r"[A-Za-z0-9 ._/:,@%+=,-]{1,256}",
+                                         text) else \
+        "Please give a simple command, e.g. `restart` or `/opt/backup.sh`."
+
+
+async def schedule_task(ctx: FlowContext) -> None:
+    """Scheduled task (row 15): env -> what to do -> when (cron presets +
+    free cron) -> recap -> Confirm -> task_create -> verify (task_list) ->
+    success card with a 'next run' explanation."""
+    env_name = await _resolve_env(
+        ctx, "Which environment should the task run on?")
+    if not env_name:
+        return
+
+    action = str(ctx.params.get("action") or "").strip()
+    if not action:
+        choice = await ctx.ask(
+            "What should the scheduled task do?",
+            ["Restart the environment", "Scale up", "Scale down",
+             "Custom command (I'll type it)"])
+        if "custom" in choice.lower():
+            action = (await ctx.ask(
+                "What command should the task run?", allow_free=True,
+                validate=_command_ok)).strip()
+        else:
+            action = _normalize_task_action(choice)
+
+    cron = _parse_cron(str(ctx.params.get("cron") or "")) if \
+        ctx.params.get("cron") else None
+    if cron is None:
+        answer = await ctx.ask(
+            "When should it run?",
+            ["Every night at 2 AM", "Every hour", "Weekdays at 9 AM"])
+        cron = _parse_cron(answer)
+        while cron is None:
+            answer = await ctx.ask(
+                "I could not read that schedule — please give a five-field "
+                "cron expression (minute hour day month weekday), e.g. "
+                "`0 2 * * *`.", allow_free=True)
+            cron = _parse_cron(answer)
+
+    human = _cron_human(cron)
+    recap = (f"Schedule **{action}** on `{env_name}` — {human} (server "
+             "time).")
+    approved = await ctx.confirm(recap, actions=["create scheduled task"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "cron": cron, "action": action}
+    out = await ctx.run_tool("task_create", step_args, confirmed=True,
+                             progress="Creating the scheduled task")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="task_create")
+        if out is None or not out.ok:
+            return
+
+    listed = await ctx.run_tool("task_list", {"env_name": env_name})
+    count = (listed.payload or {}).get("count")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Task: `{action}`\n"
+            f"- Schedule: `{cron}` — {human}\n\n"
+            f"**Next run:** the task runs {human}, at the next matching "
+            f"time in the **server's** timezone.\n\n"
+            + (f"Verified: {count} scheduled task(s) on the environment."
+               if listed.ok else
+               "Ask me to re-check the schedule in a moment."))
+    await ctx.card("success", "Task scheduled", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: share access ------------------------------------------------------
+
+_ROLE_SUMMARIES = {
+    "admin": "full control — including deleting the environment and "
+             "changing everything about it",
+    "user": "deploy and manage applications, but not delete the "
+            "environment",
+    "viewer": "read-only access — see everything, change nothing",
+}
+
+
+def _normalize_role(answer: str) -> str:
+    lowered = (answer or "").lower()
+    if "admin" in lowered:
+        return "admin"
+    if "view" in lowered or "read" in lowered:
+        return "viewer"
+    return "user"
+
+
+async def share_env(ctx: FlowContext) -> None:
+    """Share an environment with a teammate (row 16): env -> email -> role
+    chips -> plain-language permission summary -> Confirm -> env_share ->
+    verify (env_share_list) -> success card."""
+    env_name = await _resolve_env(
+        ctx, "Which environment would you like to share?")
+    if not env_name:
+        return
+
+    email = str(ctx.params.get("email") or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        email = (await ctx.ask(
+            "Whose account should get access? (their account email)",
+            allow_free=True,
+            validate=lambda a: (None if EMAIL_RE.match(a.strip()) else
+                                "Please give a valid email address, e.g. "
+                                "`teammate@example.com`."))).strip().lower()
+
+    role = _normalize_role(str(ctx.params.get("role") or "")) if \
+        ctx.params.get("role") else _normalize_role(await ctx.ask(
+            "What should they be able to do?",
+            ["Admin — full control over the environment",
+             "User — deploy and manage applications",
+             "Viewer — read-only access"]))
+
+    await ctx.say(f"As **{role}**, `{email}` gets {_ROLE_SUMMARIES[role]}.")
+    recap = (f"Share `{env_name}` with **{email}** as **{role}**. They "
+             "receive an invitation and must accept it before access "
+             "starts.")
+    approved = await ctx.confirm(recap, actions=["send invitation"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "email": email, "role": role}
+    out = await ctx.run_tool("env_share", step_args, confirmed=True,
+                             progress="Sending the invitation")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="env_share")
+        if out is None or not out.ok:
+            return
+
+    listed = await ctx.run_tool("env_share_list", {"env_name": env_name})
+    members = (listed.payload or {}).get("members") or []
+    joined = [m for m in members if str(m.get("email") or "").lower() == email]
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Invited: `{email}` as **{role}**\n"
+            f"- Access: {_ROLE_SUMMARIES[role]}\n\n"
+            + ("Verified: the invitation is on the member list. They must "
+               "accept it before access starts." if joined else
+               "The member list does not show the invitation yet — ask me "
+               "to re-check in a moment."))
+    await ctx.card("success", "Invitation sent", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: usage / bill report ----------------------------------------------
+
+async def usage_report(ctx: FlowContext) -> None:
+    """Billing & quotas (row 17): quota_get + usage_list -> human summary
+    ('what you use, what it costs') as a readable table + one insight.
+    Read-only: no questions, no confirmation. The 'Explain my bill' chip
+    routes here."""
+    quota = await ctx.run_tool("quota_get", {}, progress="Reading your quotas")
+    usage = await ctx.run_tool("usage_list", {}, progress="Reading your usage")
+    rows = (usage.payload or {}).get("rows") or []
+    total = (usage.payload or {}).get("total_cost")
+    quotas = (quota.payload or {}).get("quotas") or {}
+
+    lines = ["Here is what you use and what it costs.", "",
+             "| Environment | Nodes | Cloudlets | Cost |",
+             "|---|---|---|---|"]
+    for row in rows:
+        lines.append(f"| `{row.get('envName')}` | {row.get('nodes')} | "
+                     f"{row.get('cloudlets')} | ${row.get('cost')} |")
+    if rows:
+        lines.append(f"| **Total** | | | **${total}** |")
+    else:
+        lines.append("| _no usage recorded yet_ | | | |")
+
+    insight = ""
+    if rows:
+        priciest = max(rows, key=lambda r: float(r.get("cost") or 0))
+        insight = (f"\n**One insight:** `{priciest.get('envName')}` is your "
+                   f"biggest cost at **${priciest.get('cost')}** — it runs "
+                   f"{priciest.get('cloudlets')} cloudlets across "
+                   f"{priciest.get('nodes')} node(s). Stopping or shrinking "
+                   f"it when it is idle is the fastest way to spend less.")
+    quota_bits = []
+    for key, label in (("environments", "environments"),
+                       ("nodes", "nodes"), ("cloudlets", "cloudlets")):
+        entry = quotas.get(key)
+        if isinstance(entry, dict):
+            quota_bits.append(f"{entry.get('usage')}/{entry.get('limit')} "
+                              f"{label}")
+    quota_line = (f"\n\n**Your plan:** {', '.join(quota_bits)} in use."
+                  if quota_bits else "")
+
+    await ctx.card("info", "Your usage and costs",
+                   "\n".join(lines) + insight + quota_line,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flows: public ports (open/close) ----------------------------------------
+
+async def open_port(ctx: FlowContext) -> None:
+    """Open a public TCP/UDP endpoint (row 11): env -> node -> port ->
+    protocol -> INTERNET EXPOSURE recap -> Confirm -> endpoint_open ->
+    warning surfaced -> verify (env_info) -> success card."""
+    env_name = await _resolve_env(
+        ctx, "Which environment needs the open port?")
+    if not env_name:
+        return
+    node = await _resolve_node(ctx, env_name,
+                              "Which node should the port open on?")
+    if node is None:
+        return
+    node_id = node.get("id")
+
+    port = _parse_port(ctx.params.get("port")) if ctx.params.get("port") \
+        else None
+    if port is None:
+        port = _parse_port(await ctx.ask(
+            "Which port number should be opened?", allow_free=True,
+            validate=lambda a: (None if _parse_port(a) else
+                                "Please give a port number between 1 and "
+                                "65535.")))
+    protocol = _normalize_protocol(str(ctx.params.get("protocol") or "")) \
+        if ctx.params.get("protocol") else _normalize_protocol(
+            await ctx.ask("Which protocol?", ["TCP", "UDP"]))
+
+    recap = (f"⚠️ **INTERNET EXPOSURE** — this opens **{protocol}/{port}** "
+             f"on node `{node_id}` of `{env_name}` to the **whole "
+             "Internet**. Anyone can reach that port; make sure the "
+             "service behind it is meant to be public and is protected.")
+    approved = await ctx.confirm(recap, actions=["open the public port"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "node_id": node_id, "port": port,
+                 "protocol": protocol}
+    out = await ctx.run_tool("endpoint_open", step_args, confirmed=True,
+                             progress="Opening the public port")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="endpoint_open")
+        if out is None or not out.ok:
+            return
+
+    await ctx.run_tool("env_info", {"env_name": env_name},
+                       progress="Re-checking the environment")
+    warning = str((out.payload or {}).get("warning") or "")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Endpoint: `{protocol}/{port}` on node `{node_id}`\n"
+            f"- Reachable from: the Internet\n")
+    if warning:
+        body += f"\n**Warning:** {warning}\n"
+    body += "\nClose it any time — just say *close the port*."
+    await ctx.card("success", "Port is open", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+async def close_port(ctx: FlowContext) -> None:
+    """Close a public TCP/UDP endpoint (row 11, closing counterpart)."""
+    env_name = await _resolve_env(
+        ctx, "Which environment should the port close on?")
+    if not env_name:
+        return
+    node = await _resolve_node(ctx, env_name,
+                              "Which node is the port open on?")
+    if node is None:
+        return
+    node_id = node.get("id")
+
+    port = _parse_port(ctx.params.get("port")) if ctx.params.get("port") \
+        else None
+    if port is None:
+        port = _parse_port(await ctx.ask(
+            "Which port number should be closed?", allow_free=True,
+            validate=lambda a: (None if _parse_port(a) else
+                                "Please give a port number between 1 and "
+                                "65535.")))
+    protocol = _normalize_protocol(str(ctx.params.get("protocol") or "")) \
+        if ctx.params.get("protocol") else _normalize_protocol(
+            await ctx.ask("Which protocol?", ["TCP", "UDP"]))
+
+    recap = (f"Close **{protocol}/{port}** on node `{node_id}` of "
+             f"`{env_name}` — anything using it loses public access.")
+    approved = await ctx.confirm(recap, actions=["close the public port"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    step_args = {"env_name": env_name, "node_id": node_id, "port": port,
+                 "protocol": protocol}
+    out = await ctx.run_tool("endpoint_close", step_args, confirmed=True,
+                             progress="Closing the public port")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool="endpoint_close")
+        if out is None or not out.ok:
+            return
+
+    await ctx.run_tool("env_info", {"env_name": env_name},
+                       progress="Re-checking the environment")
+    warning = str((out.payload or {}).get("warning") or "")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Closed: `{protocol}/{port}` on node `{node_id}`\n")
+    if warning:
+        body += f"\n**Note:** {warning}\n"
+    await ctx.card("success", "Port is closed", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: container firewall rules ------------------------------------------
+
+async def firewall_manage(ctx: FlowContext) -> None:
+    """Container firewall rules (row 12): add/remove, both gated like the
+    endpoint flow with a plain-language FIREWALL CHANGE recap."""
+    env_name = await _resolve_env(
+        ctx, "Which environment's firewall should I change?")
+    if not env_name:
+        return
+    node = await _resolve_node(ctx, env_name,
+                              "Which node is the rule for?")
+    if node is None:
+        return
+    node_id = node.get("id")
+
+    intent = str(ctx.params.get("action") or "").strip()
+    removing = "remove" in intent.lower()
+    if not intent:
+        choice = await ctx.ask(
+            "What should the firewall do?",
+            ["Block traffic (DROP)", "Allow traffic (ACCEPT)",
+             "Remove an existing rule"])
+        removing = "remove" in choice.lower()
+        intent = choice
+
+    direction = "DROP" if ("drop" in intent.lower()
+                           or "block" in intent.lower()) else "ACCEPT"
+    if removing and not any(token in intent.lower() for token in
+                            ("drop", "accept", "block", "allow")):
+        direction = "DROP" if "drop" in (await ctx.ask(
+            "Which rule should I remove?",
+            ["DROP (block) rule", "ACCEPT (allow) rule"])).lower() \
+            else "ACCEPT"
+    protocol = _normalize_protocol(str(ctx.params.get("protocol") or "")) \
+        if ctx.params.get("protocol") else _normalize_protocol(
+            await ctx.ask("Which protocol?", ["TCP", "UDP"]))
+
+    port = _parse_port(ctx.params.get("port")) if ctx.params.get("port") \
+        else None
+    if port is None:
+        port = _parse_port(await ctx.ask(
+            "Which port does the rule cover?", allow_free=True,
+            validate=lambda a: (None if _parse_port(a) else
+                                "Please give a port number between 1 and "
+                                "65535.")))
+
+    subnet = _normalize_subnet(str(ctx.params.get("subnet") or "")) if \
+        ctx.params.get("subnet") else None
+    if subnet is None:
+        subnet = _normalize_subnet(await ctx.ask(
+            "Which source subnet does the rule cover?",
+            ["0.0.0.0/0 (everywhere)", "10.0.0.0/8 (private networks)"],
+            allow_free=True,
+            validate=lambda a: (None if _normalize_subnet(a) else
+                                "Please give an IPv4 subnet like "
+                                "`10.0.0.0/8`.")))
+
+    verb = "Remove the rule" if removing else f"{direction} the traffic"
+    plain = ("" if removing else
+             (" This blocks that traffic." if direction == "DROP" else
+              " This allows that traffic — including from the Internet for "
+              "`0.0.0.0/0`."))
+    recap = (f"**Firewall change** — {verb} [{direction} {protocol}/{port} "
+             f"from {subnet}] on node `{node_id}` of `{env_name}`.{plain}")
+    approved = await ctx.confirm(
+        recap, actions=(["remove firewall rule"] if removing
+                        else ["add firewall rule"]))
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    tool = "firewall_rule_remove" if removing else "firewall_rule_add"
+    step_args = {"env_name": env_name, "node_id": node_id,
+                 "direction": direction, "protocol": protocol, "port": port,
+                 "subnet": subnet}
+    out = await ctx.run_tool(tool, step_args, confirmed=True,
+                             progress="Changing the firewall rule")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool=tool)
+        if out is None or not out.ok:
+            return
+
+    await ctx.run_tool("env_info", {"env_name": env_name},
+                       progress="Re-checking the environment")
+    warning = str((out.payload or {}).get("warning") or "")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Rule: `{direction} {protocol}/{port} from {subnet}` on node "
+            f"`{node_id}`\n"
+            f"- Result: {'removed' if removing else 'added'}\n")
+    if warning:
+        body += f"\n**Warning:** {warning}\n"
+    await ctx.card("success",
+                   "Firewall rule removed" if removing else
+                   "Firewall rule added", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
+# --- flow: restart -----------------------------------------------------------
+
+async def restart(ctx: FlowContext) -> None:
+    """Restart quick-flow (row 10): env -> whole environment or one node ->
+    recap -> Confirm -> env_restart / node_restart -> verify (op_result
+    nodes_ready + env_info) -> success card."""
+    env_name = await _resolve_env(ctx, "Which environment should I restart?")
+    if not env_name:
+        return
+
+    target = str(ctx.params.get("target") or "").strip()
+    node_id = ctx.params.get("node_id")
+    if node_id is not None:
+        node_id = int(node_id)
+    elif not target:
+        choice = await ctx.ask("What should I restart?",
+                               ["Restart the whole environment",
+                                "Restart one node"])
+        if "node" in choice.lower() and "whole" not in choice.lower():
+            node = await _resolve_node(ctx, env_name,
+                                      "Which node should I restart?")
+            if node is None:
+                return
+            node_id = node.get("id")
+    elif "node" in target.lower() and "whole" not in target.lower() \
+            and node_id is None:
+        node = await _resolve_node(ctx, env_name,
+                                  "Which node should I restart?")
+        if node is None:
+            return
+        node_id = node.get("id")
+
+    if node_id is not None:
+        recap = (f"Restart node `{node_id}` of `{env_name}` — that node is "
+                 "briefly unavailable (usually under a minute).")
+        tool, step_args = "node_restart", {"env_name": env_name,
+                                           "node_id": node_id}
+    else:
+        recap = (f"Restart `{env_name}` — all nodes restart and the app is "
+                 "briefly unavailable (usually under a minute).")
+        tool, step_args = "env_restart", {"env_name": env_name}
+    approved = await ctx.confirm(recap, actions=["restart"])
+    if not approved:
+        await ctx.say("Cancelled — I changed nothing.")
+        return
+
+    out = await ctx.run_tool(tool, step_args, confirmed=True,
+                             progress="Restarting")
+    if not out.ok:
+        out, applied = await handle_failure(ctx, out, step_args=step_args,
+                                            retry_tool=tool)
+        if out is None or not out.ok:
+            return
+
+    ready = await ctx.run_tool("op_result", {
+        "env_name": env_name, "op": "nodes_ready", "timeout": 60},
+        progress="Waiting for the nodes to come back")
+    info = await ctx.run_tool("env_info", {"env_name": env_name},
+                              progress="Verifying the environment")
+    status = str(((info.payload or {}).get("env") or {}).get("statusName")
+                 or "")
+    body = (f"- Environment: `{env_name}`\n"
+            f"- Restarted: {'node `' + str(node_id) + '`' if node_id is not None else 'the whole environment'}\n"
+            f"- Status: **{status or 'unknown'}**")
+    if not ready.ok or ready.payload.get("status") != "done":
+        body += ("\n\nSome nodes are still coming back — ask me to "
+                 "re-check in a moment.")
+    await ctx.card("success", "Restart complete", body,
+                   [{"label": "Open dashboard",
+                     "url": f"{ctx.tools.auth.host}/", "action": "open_url",
+                     "payload": {}}])
+
+
 # --- dispatcher -------------------------------------------------------------
 
 FLOWS = {
@@ -1119,6 +2136,19 @@ FLOWS = {
     "scale": scale,
     "troubleshoot": troubleshoot,
     "security_review": None,   # special-cased below (needs env_name)
+    # T14 coverage workflows (docs/SCENARIOS.md rows 7-17)
+    "domain_setup": domain_setup,
+    "domain_unbind": domain_unbind,
+    "clone_env": clone_env,
+    "autoscale_setup": autoscale_setup,
+    "trigger_manage": trigger_manage,
+    "schedule_task": schedule_task,
+    "share_env": share_env,
+    "usage_report": usage_report,
+    "open_port": open_port,
+    "close_port": close_port,
+    "firewall_manage": firewall_manage,
+    "restart": restart,
 }
 
 

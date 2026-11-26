@@ -217,6 +217,15 @@ body {
 
 .chip[disabled] { opacity: 0.55; cursor: default; transform: none; }
 
+/* follow-up suggestion chips after success cards (re-used .chip component) */
+.follow-ups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
 /* ---------- message bubbles ---------- */
 
 .msg-user {

@@ -7,7 +7,9 @@ Three deliverables in one repo:
 1. **MCP server** — exposes the platform REST API as MCP tools, acting strictly
    with the end user's own rights.
 2. **Agent backend** — chat + guided flows (deploy app, add database, scale,
-   troubleshoot) with clarifying questions and action confirmations.
+   troubleshoot, domains, clone, auto-scaling, scheduled tasks, share access,
+   usage/bill, ports & firewall, restart) with clarifying questions and
+   action confirmations.
 3. **Browser extension (Chrome MV3)** — the "widget": floating assistant button
    on the dashboard + Side Panel chat. Zero platform changes.
 
@@ -231,6 +233,36 @@ one clarifying question with options (the "наводящие вопросы"):
      logged, always masked in tool results and cards (contract rule).
    - Least privilege by design: the assistant carries only the end user's own
      platform rights (session passthrough) — nothing more.
+7. **Coverage workflows (T14, SCENARIOS.md rows 7-17)** — one guided flow
+   per everyday journey, same house style (one question per step with option
+   chips -> recap -> Confirm -> execute -> observable-state verify -> success
+   card with actions; failures -> diagnose -> auto-fix):
+   - `domain_setup` / `domain_unbind`: connect a custom domain (hostname-
+     validated free text), optional Let's Encrypt SSL, verify via env_info +
+     a URL check with a DNS hint when the domain does not resolve yet;
+     detach path included.
+   - `clone_env`: source -> new name -> what-gets-cloned recap -> clone ->
+     wait ready (`op_result`) -> success card.
+   - `autoscale_setup` / `trigger_manage`: node group -> metric (CPU/RAM/
+     Disk/Requests chips) -> threshold presets -> step -> plain-language
+     'what will happen' -> `trigger_create` (scale-up/down pair) -> verify
+     via `trigger_list`; management path lists and removes triggers.
+   - `schedule_task`: what to do (restart/scale up/scale down/custom) -> when
+     (cron presets: every night at 2am / every hour / weekdays 9am + free
+     5-field cron) -> `task_create` -> success card with a 'next run'
+     explanation.
+   - `share_env`: email -> role chips (Admin/User/Viewer) -> plain-language
+     permission summary -> `env_share` -> verify via `env_share_list`.
+   - `usage_report`: `quota_get` + `usage_list` -> readable cost table + one
+     insight + plan usage (the 'Explain my bill' chip routes here; read-only).
+   - `open_port` / `close_port`: public endpoints gated by an explicit
+     INTERNET EXPOSURE recap; the tool `warning` field is surfaced on the
+     success card.
+   - `firewall_manage`: container firewall rule add/remove, gated with a
+     FIREWALL CHANGE recap (auto-fix may never weaken firewall state).
+   - `restart`: whole environment or one node -> brief-outage recap ->
+     `env_restart`/`node_restart` -> verify (`op_result(nodes_ready)` +
+     `env_info`) -> success card.
 
 Clarifying-question protocol: tool `ask_user(question, options[], allow_free)`
 renders as choice chips in the extension; free text always allowed.

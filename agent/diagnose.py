@@ -153,7 +153,8 @@ async def gather_evidence(ctx: FlowContext, env_name: Optional[str]) -> List[dic
     for name, args, label in (
             ("env_info", {"env_name": env_name}, "state"),
             ("env_stats", {"env_name": env_name}, "usage"),
-            ("logs_read", {"env_name": env_name, "limit": 20}, "logs")):
+            ("logs_read", {"env_name": env_name, "limit": 20}, "logs"),
+            ("file_list", {"env_name": env_name, "path": "/"}, "files")):
         try:
             outcome = await ctx.tools.run(name, args)
         except Exception as exc:  # evidence must never crash diagnosis

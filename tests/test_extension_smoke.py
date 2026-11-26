@@ -370,6 +370,12 @@ def test_sidepanel_chat_roundtrip_and_deploy_wizard(browser, agent_server, stati
     assert success.locator(".mono-value .md-copy").count() >= 2    # copy buttons
     shot(panel, "success-dark")
 
+    # follow-up suggestion chips render after the success card (T14),
+    # re-using the suggestion-chip component
+    assert panel.locator(".follow-ups .chip.suggestion.followup").count() >= 2
+    assert panel.locator(".chip.suggestion.followup",
+                         has_text="Connect my domain").count() == 1
+
 
 # --------------------------------------------------------------------- #
 # 4. error / security / audit cards                                     #
